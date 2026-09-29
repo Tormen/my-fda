@@ -47,8 +47,8 @@ A destructive command shows first and acts only with `go`. GONE grants --
 the one class safe to take away without looking -- go with `cleanup go`;
 any other selection goes through the pipe `list` is made for:
 
-    my-fda list | grep GONE | cut -f 1 | my-fda remove        # shows
-    my-fda list | grep GONE | cut -f 1 | my-fda remove go     # acts
+    my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove        # shows
+    my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove go     # acts
 
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.

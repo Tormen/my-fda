@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="0a1107c"
+SCRIPT_COMMIT="3ca2214"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -146,7 +146,7 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 "-": shows the grants it would take away; with go, takes them
                 away. IDs as arguments, or one per line on stdin (the first
                 column of a list line is enough):
-                  $US list | grep GONE | cut -f 1 | $US remove go
+                  $US list | grep 'denied\\[0\\]' | cut -f 1 | $US remove go
   cleanup [go]  the GONE grants -- the one class safe to take away without
                 looking: shows them; with go, takes them away
   reset [go]    all grants at once: shows them; with go, takes them all away
@@ -494,7 +494,7 @@ ids_to() { # <FILE> [ID...]
   if [ $# -gt 0 ]; then
     printf '%s\n' "$@" > "$_f"
   elif [ -t 0 ]; then
-    err 00035 "no IDs: give them as arguments, or pipe them in ($US list | grep GONE | cut -f 1 | $US remove)"
+    err 00035 "no IDs: give them as arguments, or pipe them in ($US list | grep ... | cut -f 1 | $US remove)"
   else
     awk 'NF { print $1 }' > "$_f"
   fi
@@ -938,6 +938,12 @@ t_remove_reads_ids_from_a_list_pipe() {
   _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
   if [ "$_left" = "$T_DIR/bin/tool" ]; then t_pass; else t_fail "left '$_left', '$_o'"; fi
 }
+t_remove_the_documented_denied_pipe() {
+  t_grant 1 "$T_DIR/bin/tool" 0; t_grant 0 com.known.app 2
+  _o=$(cmd_list | grep 'denied\[0\]' | cut -f 1 | cmd_remove go 2>&1)
+  _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
+  if [ "$_left" = "com.known.app" ]; then t_pass; else t_fail "left '$_left', '$_o'"; fi
+}
 t_remove_empty_pipe_is_nothing_to_do() {
   t_grant 1 "$T_DIR/bin/tool"
   _o=$(printf '' | cmd_remove go 2>&1); _rc=$?
@@ -1126,7 +1132,8 @@ run_tests() { # [FILTER]
                 t_id_is_first_stable_and_cut_returns_it t_grep_GONE_picks_only_grant_rows \
                 t_other_services_are_not_listed \
                 t_remove_without_go_changes_nothing t_remove_go_takes_only_the_named_and_backs_up \
-                t_remove_reads_ids_from_a_list_pipe t_remove_empty_pipe_is_nothing_to_do \
+                t_remove_reads_ids_from_a_list_pipe t_remove_the_documented_denied_pipe \
+                t_remove_empty_pipe_is_nothing_to_do \
                 t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
                 t_cleanup_without_go_changes_nothing t_cleanup_go_takes_only_the_gone \
                 t_cleanup_with_nothing_gone_is_nothing_to_do \
