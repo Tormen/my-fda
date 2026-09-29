@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="d15db5e"
+SCRIPT_COMMIT="0a1107c"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -147,6 +147,8 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 away. IDs as arguments, or one per line on stdin (the first
                 column of a list line is enough):
                   $US list | grep GONE | cut -f 1 | $US remove go
+  cleanup [go]  the GONE grants -- the one class safe to take away without
+                looking: shows them; with go, takes them away
   reset [go]    all grants at once: shows them; with go, takes them all away
                 -- the Terminal running this loses its grant too -- and says
                 what to give back
@@ -528,9 +530,31 @@ cmd_remove() { # [go] [ID...]
   msg "removed $_k grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE"
 }
 
+# The GONE grants -- the one class safe to take away without looking: nothing
+# is left that the grant could apply to. The same delete path as remove.
+cmd_cleanup() { # [go]
+  _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
+  [ $# -eq 0 ] || err 00039 "cleanup takes no IDs -- '$US remove' takes some"
+  PHASE="reading the grants -- nothing was changed"
+  grants_to "$WORK/all"
+  awk -F '\t' '$5 ~ /^GONE/' "$WORK/all" > "$WORK/sel"
+  _k=$(wc -l < "$WORK/sel" | tr -d ' ')
+  if [ "$_k" = "0" ]; then
+    msg "no GONE grants -- nothing to clean up [grants $(wc -l < "$WORK/all" | tr -d ' ')]"
+    return 0
+  fi
+  render < "$WORK/sel"
+  if [ "$_go" = "0" ]; then
+    say "--> nothing changed -- '$US cleanup go' takes these $_k GONE grant(s) away"
+    return 0
+  fi
+  delete_grants "$WORK/sel"
+  msg "cleaned up $_k GONE grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE"
+}
+
 cmd_reset() { # [go]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 0 ] || err 00039 "reset takes no IDs -- '$US remove' takes some"
+  [ $# -eq 0 ] || err 00040 "reset takes no IDs -- '$US remove' takes some"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
   _k=$(wc -l < "$WORK/all" | tr -d ' ')
@@ -543,9 +567,9 @@ cmd_reset() { # [go]
     return 0
   fi
   BACKUP_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p "$BACKUP_DIR" || err 00040 "cannot create BACKUP_DIR '$BACKUP_DIR'"
+  mkdir -p "$BACKUP_DIR" || err 00041 "cannot create BACKUP_DIR '$BACKUP_DIR'"
   _l="$BACKUP_DIR/list.$BACKUP_STAMP.txt"
-  VRB=1 render < "$WORK/all" > "$_l" || err 00041 "cannot save the list to '$_l' -- nothing was changed"
+  VRB=1 render < "$WORK/all" > "$_l" || err 00042 "cannot save the list to '$_l' -- nothing was changed"
   delete_grants "$WORK/all"
   msg "took away $_k grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE, the list: $_l"
   msg " >>> to give back what had been allowed:"
@@ -604,7 +628,7 @@ int main(int argc, char **argv) {
 
     rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
     if (rc != 0) {
-        fprintf(stderr, "ERROR 00042 [70]: my-fda." MY_FDA_NAME ": cannot start %s: %s\n",
+        fprintf(stderr, "ERROR 00043 [70]: my-fda." MY_FDA_NAME ": cannot start %s: %s\n",
                 MY_FDA_TARGET, strerror(rc));
         return 70;
     }
@@ -612,7 +636,7 @@ int main(int argc, char **argv) {
 
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
-            fprintf(stderr, "ERROR 00043 [70]: my-fda." MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            fprintf(stderr, "ERROR 00044 [70]: my-fda." MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
             return 70;
         }
     }
@@ -629,7 +653,7 @@ marker_of() { # <launcher>
 
 check_name() { # <NAME>
   case "$1" in
-    ""|*[!A-Za-z0-9._-]*) err 00044 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+    ""|*[!A-Za-z0-9._-]*) err 00045 "name '$1': letters, digits, '.', '_' and '-' only" ;;
   esac
 }
 
@@ -647,39 +671,39 @@ daemons_to() { # <FILE>
 }
 
 cmd_create() { # <NAME> <TARGET>
-  [ $# -eq 2 ] || err 00045 "usage: $US create <NAME> <TARGET>"
+  [ $# -eq 2 ] || err 00046 "usage: $US create <NAME> <TARGET>"
   check_name "$1"
   _t=$2
   _l="$HELPER_DIR/my-fda.$1"
-  case "$_t" in /*) ;; *) err 00046 "target '$_t' must be an absolute path" ;; esac
-  case "$_t" in *\"*|*\\*) err 00047 "target '$_t': no '\"' or '\\' in the path" ;; esac
-  [ -f "$_t" ] && [ -x "$_t" ] || err 00048 "target '$_t' is not an executable file"
+  case "$_t" in /*) ;; *) err 00047 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00048 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00049 "target '$_t' is not an executable file"
   for _cel in $BREW_CELLARS; do
     case "$_t" in "$_cel"/*)
-      err 00049 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+      err 00050 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
     esac
   done
   for _sh in $SHELLS; do
-    [ "$_t" = "$_sh" ] && err 00050 "target '$_t' is a shell: every script it runs would get full disk access"
+    [ "$_t" = "$_sh" ] && err 00051 "target '$_t' is a shell: every script it runs would get full disk access"
   done
-  [ -e "$_l" ] && err 00051 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  [ -e "$_l" ] && err 00052 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00052 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00053 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00053 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00054 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
   run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00054 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00055 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00055 "the built launcher does not carry its target marker -- not installed"
+    || err 00056 "the built launcher does not carry its target marker -- not installed"
   if [ "$(id -u)" = "0" ]; then run install -m 700 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 700 "$WORK/launcher" "$_l"; fi || err 00056 "cannot install '$_l'"
+  else run install -m 700 "$WORK/launcher" "$_l"; fi || err 00057 "cannot install '$_l'"
   msg "created $_l -> $_t [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it, and $US test $1"
 }
@@ -688,12 +712,12 @@ cmd_create() { # <NAME> <TARGET>
 launcher_of() { # <NAME>
   check_name "$1"
   _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00057 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00058 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00058 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00059 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -736,17 +760,17 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00059 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00060 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00060 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00061 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00061 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00062 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00062 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00063 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -758,7 +782,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00063 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00064 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -776,7 +800,7 @@ cmd_destroy() { # [go] <NAME>
   DELETED=0
   [ -s "$WORK/sel" ] && delete_grants "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00064 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00065 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l [grant rows deleted $DELETED] -- TCC.db backup: $BACKUP_FILE"
   else
@@ -931,6 +955,26 @@ t_remove_quote_in_client_deletes_that_one() {
   _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
   if [ "$_left" = "$T_DIR/it" ]; then t_pass; else t_fail "left '$_left', '$_o'"; fi
 }
+t_cleanup_without_go_changes_nothing() {
+  t_grant 1 "$T_DIR/nope"
+  _o=$(cmd_cleanup 2>&1)
+  if [ "$(t_count)" = "1" ] && [ ! -d "$BACKUP_DIR" ] && case "$_o" in *"nothing changed"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "count $(t_count), '$_o'"; fi
+}
+t_cleanup_go_takes_only_the_gone() {
+  t_grant 1 "$T_DIR/nope"; t_grant 0 com.vanished.app
+  t_grant 1 "$T_DIR/bin/tool"; t_grant 0 com.known.app; t_grant 0 com.apple.sshd-keygen-wrapper; t_grant 1 /bin/sh
+  _o=$(cmd_cleanup go 2>&1)
+  _left=$("$c_sqlite3" "$TCC_DB" "select client from access order by client;" | tr '\n' ' ')
+  if [ "$_left" = "/bin/sh $T_DIR/bin/tool com.apple.sshd-keygen-wrapper com.known.app " ] \
+     && case "$_o" in *"cleaned up 2 GONE grant(s) [rows deleted 2, remaining 0]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "left '$_left', '$_o'"; fi
+}
+t_cleanup_with_nothing_gone_is_nothing_to_do() {
+  t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_cleanup go 2>&1); _rc=$?
+  if [ "$_rc" = "0" ] && [ "$(t_count)" = "1" ] && [ ! -d "$BACKUP_DIR" ]; then t_pass; else t_fail "rc $_rc, '$_o'"; fi
+}
 t_reset_go_takes_all_and_saves_the_list() {
   t_grant 1 "$T_DIR/bin/tool"; t_grant 0 com.known.app; t_grant 1 "$T_DIR/nope"
   t_grant 1 "$T_DIR/bin/tool" 2 kTCCServiceCamera
@@ -1061,7 +1105,7 @@ t_dashed_verb_and_rm_name_the_verb() {
 }
 t_help_names_every_verb() {
   _h=$(usage); _bad=""
-  for _v in list add remove reset create destroy status test; do
+  for _v in list add remove cleanup reset create destroy status test; do
     case "$_h" in *"
   $_v "*) ;; *) _bad="$_bad $_v" ;; esac
   done
@@ -1084,6 +1128,8 @@ run_tests() { # [FILTER]
                 t_remove_without_go_changes_nothing t_remove_go_takes_only_the_named_and_backs_up \
                 t_remove_reads_ids_from_a_list_pipe t_remove_empty_pipe_is_nothing_to_do \
                 t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
+                t_cleanup_without_go_changes_nothing t_cleanup_go_takes_only_the_gone \
+                t_cleanup_with_nothing_gone_is_nothing_to_do \
                 t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
                 t_add_opens_the_pane_and_shows_the_file t_add_already_granted_opens_nothing \
                 t_create_refuses_what_it_must t_launcher_passes_args_status_and_carries_its_target \
@@ -1114,14 +1160,14 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00065 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00066 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
-    --list|--add|--remove|--reset|--create|--destroy|--status|--test)
-                      err 00066 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00067 "unknown option '$_a' (--help)" ;;
+    --list|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
+                      err 00067 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00068 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -1129,15 +1175,15 @@ done
 
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
-  list|add|remove|reset|create|destroy|status|test) ;;
-  rm)  err 00068 "no such command; you mean \`$US remove\`" ;;
+  list|add|remove|cleanup|reset|create|destroy|status|test) ;;
+  rm)  err 00069 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00069 "unknown command '$CMD' (--help)" ;;
+  *)   err 00070 "unknown command '$CMD' (--help)" ;;
 esac
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00070 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00071 "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 
@@ -1145,6 +1191,7 @@ case "$CMD" in
   list)    cmd_list "$@" ;;
   add)     cmd_add "$@" ;;
   remove)  cmd_remove "$@" ;;
+  cleanup) cmd_cleanup "$@" ;;
   reset)   cmd_reset "$@" ;;
   create)  cmd_create "$@" ;;
   destroy) cmd_destroy "$@" ;;

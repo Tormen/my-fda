@@ -36,14 +36,16 @@ grant.
     my-fda add <PATH>                 "+": opens the pane, shows PATH in Finder to drag in, checks it
     my-fda remove <ID>...             "-": shows what it would take away
     my-fda remove go <ID>...          ...and takes it away
+    my-fda cleanup [go]               the GONE grants: shows them; with go, takes them away
     my-fda reset [go]                 all grants at once, and what to give back
     my-fda create <NAME> <TARGET>     build and install a launcher
     my-fda destroy [go] <NAME>        delete a launcher and its grant
     my-fda status [<NAME>]            each launcher, its target, its grant, the daemon using it
     my-fda test <NAME>                start that daemon through launchd
 
-A destructive command shows first and acts only with `go`. The pipe `list`
-is made for:
+A destructive command shows first and acts only with `go`. GONE grants --
+the one class safe to take away without looking -- go with `cleanup go`;
+any other selection goes through the pipe `list` is made for:
 
     my-fda list | grep GONE | cut -f 1 | my-fda remove        # shows
     my-fda list | grep GONE | cut -f 1 | my-fda remove go     # acts
