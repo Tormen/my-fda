@@ -52,11 +52,19 @@ any other selection goes through the pipe `list` is made for:
 
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.
-- **Changes** go straight to TCC.db with sqlite3 (`tccutil` handles app ids
-  only): a backup first (`sqlite3 .backup` into `BACKUP_DIR`, never `cp` --
-  tccd holds the file open), then one transaction, then a count of what is
-  left, then tccd is restarted. `reset` also saves the list beside the
-  backup, so the grants to give back are known.
+- **Changes** start with a backup (`sqlite3 .backup` into `BACKUP_DIR`,
+  never `cp` -- tccd holds the file open). Each grant then goes the one way
+  the machine allows: an app id through `tccutil`, macOS's own command,
+  which knows installed apps only; the rest -- paths, and apps tccutil does
+  not know, such as a GONE one -- through sqlite in one transaction where
+  TCC.db can be written, else my-fda opens the pane with exactly the list
+  to take away with "-". Then the grants are read again, and anything
+  still there is an error. Even root with Full Disk Access may be refused
+  a write (macOS 26 on macado); the probe for it must really write, since
+  sqlite opens such a file read-only without a word.
+- **`reset`** is `tccutil reset SystemPolicyAllFiles`: every grant at once,
+  by macOS itself; it saves the list beside the backup first, so the grants
+  to give back are known.
 - **`add` only guides**: macOS grants on a click (or a device-management
   profile), and writing grants is what malware does.
 - **App ids** are checked with Spotlight: one it cannot find is `GONE`,

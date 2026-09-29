@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="3ca2214"
+SCRIPT_COMMIT="94efc9c"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -152,8 +152,12 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
   reset [go]    all grants at once: shows them; with go, takes them all away
                 -- the Terminal running this loses its grant too -- and says
                 what to give back
-                Every change first backs up TCC.db (BACKUP_DIR), then deletes
-                in one transaction and checks nothing is left.
+                Every change first backs up TCC.db (BACKUP_DIR). An app id
+                goes through tccutil (installed apps only); the rest through
+                sqlite where TCC.db can be written, else the pane opens with
+                the list to take away with "-". Then the grants are read
+                again, and anything still there is an error. reset is
+                tccutil's own: every grant at once.
 
 LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda.<NAME>, root:wheel 700
   create <NAME> <TARGET>
@@ -228,11 +232,12 @@ c_launchctl="/bin/launchctl"
 c_plutil="/usr/bin/plutil"
 c_cc="/usr/bin/cc"
 c_xcode_select="/usr/bin/xcode-select"
+c_tccutil="/usr/bin/tccutil"
 _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -411,17 +416,85 @@ backup_tcc() {
   [ -s "$BACKUP_FILE" ] || err 00025 "backup '$BACKUP_FILE' is empty -- nothing was changed"
 }
 
-# Delete the grants listed in <FILE> (classified lines): back up, delete in
-# ONE transaction, count in the same session what is left, restart tccd.
-# The count comes from the session that deleted, so it works even when the
-# delete took away this Terminal's own grant.
-delete_grants() { # <FILE>
+# Can this process write TCC.db? Not everywhere, even as root with Full Disk
+# Access (macado refused it). The probe must WRITE: sqlite opens a file it
+# may not write read-only without a word, and `BEGIN IMMEDIATE; ROLLBACK`
+# alone still succeeds then -- a DELETE of nothing is refused. The answer,
+# or sqlite's refusal, is left in $WORK/probe.
+tcc_writable() {
+  "$c_sqlite3" "$TCC_DB" "BEGIN IMMEDIATE; DELETE FROM access WHERE 0; ROLLBACK;" > "$WORK/probe" 2>&1
+}
+
+# The grants of <FILE> (classified lines) that are still there, read afresh.
+still_there() { # <FILE>
+  grants_to "$WORK/after"
+  awk -F '\t' 'NR == FNR { k[$2 FS $3] = 1; next } ($2 FS $3) in k' "$WORK/after" "$1"
+}
+
+# Take away the grants in <FILE>, each the one way this machine allows: an
+# app id through tccutil, macOS's own command -- it knows installed apps
+# only; the rest (paths, and apps tccutil does not know, such as a GONE one)
+# through sqlite where TCC.db can be written, else by hand in System
+# Settings. Then the grants are read again: only that says what is gone.
+# Sets TOOK to the tally; an error when anything asked for is still there.
+take_away() { # <FILE>
   backup_tcc
+  VIA_TCC=0; VIA_SQL=0; VIA_HAND=0
+  : > "$WORK/rest"
+  PHASE="taking grants away -- TCC.db backup: $BACKUP_FILE; '$US list' shows what is gone"
+  while IFS= read -r _line; do
+    _t=$(printf '%s\n' "$_line" | cut -f 2); _c=$(printf '%s\n' "$_line" | cut -f 3)
+    if [ "$_t" = "0" ]; then
+      [ "$VRB" = "1" ] && printf ' >>> %s reset SystemPolicyAllFiles %s\n' "$c_tccutil" "$_c"
+      if "$c_tccutil" reset SystemPolicyAllFiles "$_c" < /dev/null > "$WORK/tccutil.out" 2>&1; then
+        VIA_TCC=$((VIA_TCC + 1)); continue
+      fi
+      [ "$VRB" = "1" ] && printf '    > %s\n' "$(cat "$WORK/tccutil.out")"
+    fi
+    printf '%s\n' "$_line" >> "$WORK/rest"
+  done < "$1"
+  _hand=0
+  if [ -s "$WORK/rest" ]; then
+    if tcc_writable; then
+      sqlite_delete "$WORK/rest"
+      VIA_SQL=$(wc -l < "$WORK/rest" | tr -d ' ')
+    else
+      guide_removal "$WORK/rest"; _hand=1
+    fi
+  fi
+  still_there "$1" > "$WORK/left"
+  REMAINING=$(wc -l < "$WORK/left" | tr -d ' ')
+  [ "$_hand" = "1" ] && VIA_HAND=$(( $(wc -l < "$WORK/rest" | tr -d ' ') - REMAINING ))
+  TOOK="[tccutil $VIA_TCC, sqlite $VIA_SQL, by hand $VIA_HAND; remaining $REMAINING]"
+  if [ "$REMAINING" != "0" ]; then
+    render < "$WORK/left" | sed 's/^/    /' 1>&2
+    err 00026 "$REMAINING grant(s) still there $TOOK -- TCC.db backup: $BACKUP_FILE"
+  fi
+}
+
+# Where TCC.db cannot be written: open the pane, name exactly what to take
+# away with "-", and wait for it when someone is at the keyboard.
+guide_removal() { # <FILE>
+  _n=$(wc -l < "$1" | tr -d ' ')
+  say " >>> TCC.db cannot be written here -- macOS refuses it, even for root [sqlite: $(tr '\n' ' ' < "$WORK/probe")]"
+  say "    > take these $_n away by hand: System Settings > Full Disk Access, select each, then -"
+  render < "$1" | sed 's/^/    /'
+  run "$c_open" "$FDA_PANE_URL" || warn "    > could not open the pane ($FDA_PANE_URL) -- open it by hand"
+  if [ -t 0 ] && [ -r /dev/tty ]; then
+    PHASE="waiting for grants to be taken away by hand -- TCC.db backup: $BACKUP_FILE; '$US list' shows what is gone"
+    printf '    > press Return when they are gone: '
+    read -r _x < /dev/tty
+  fi
+}
+
+# Delete the grants listed in <FILE> with sqlite: ONE transaction, a count
+# in the same session of what is left, then restart tccd.
+sqlite_delete() { # <FILE>
   _sql="$WORK/delete.sql"
   {
     echo "BEGIN;"
     while IFS="$TAB" read -r _i _t _c _rest; do
-      case "$_t" in ""|*[!0-9]*) err 00026 "client type '$_t' of '$_c' is not a number -- nothing was changed" ;; esac
+      case "$_t" in ""|*[!0-9]*) err 00027 "client type '$_t' of '$_c' is not a number -- nothing was changed" ;; esac
       printf "DELETE FROM access WHERE service='%s' AND client_type=%s AND client='%s';\n" "$SERVICE" "$_t" "$(sql_q "$_c")"
     done < "$1"
     echo "COMMIT;"
@@ -435,16 +508,16 @@ delete_grants() { # <FILE>
   PHASE="deleting grants -- one transaction: it landed whole or not at all; TCC.db backup: $BACKUP_FILE"
   [ "$VRB" = "1" ] && printf ' >>> %s -bail %s < %s\n' "$c_sqlite3" "$TCC_DB" "$_sql"
   _out=$("$c_sqlite3" -bail "$TCC_DB" < "$_sql" 2>&1) \
-    || err 00027 "sqlite3 delete failed: $_out -- the transaction did not land; backup: $BACKUP_FILE"
+    || err 00028 "sqlite3 delete failed: $_out -- the transaction did not land; backup: $BACKUP_FILE"
   DELETED=$(printf '%s\n' "$_out" | sed -n 1p)
   REMAINING=$(printf '%s\n' "$_out" | sed -n 2p)
-  [ "$REMAINING" = "0" ] || err 00028 "grants still there after the delete [rows deleted $DELETED, remaining $REMAINING] -- backup: $BACKUP_FILE"
+  [ "$REMAINING" = "0" ] || err 00029 "grants still there after the delete [rows deleted $DELETED, remaining $REMAINING] -- backup: $BACKUP_FILE"
   run "$c_killall" tccd > /dev/null 2>&1 \
     || warn "    > could not restart tccd ($c_killall tccd) -- it may show the old grants until it restarts"
 }
 
 cmd_list() {
-  [ $# -eq 0 ] || err 00029 "list takes no arguments"
+  [ $# -eq 0 ] || err 00030 "list takes no arguments"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
   render < "$WORK/all"
@@ -452,10 +525,10 @@ cmd_list() {
 }
 
 cmd_add() { # <PATH>
-  [ $# -eq 1 ] || err 00030 "add takes one path: $US add <PATH>"
+  [ $# -eq 1 ] || err 00031 "add takes one path: $US add <PATH>"
   _p=$1
   case "$_p" in /*) ;; *) _p="$(pwd)/$_p" ;; esac
-  [ -e "$_p" ] || err 00031 "'$_p' does not exist"
+  [ -e "$_p" ] || err 00032 "'$_p' does not exist"
   for _cel in $BREW_CELLARS; do
     case "$_p" in "$_cel"/*)
       warn "    > a Homebrew version path: this grant breaks on the next upgrade -- a launcher lasts: $US create <NAME> <stable path>" ;;
@@ -470,8 +543,8 @@ cmd_add() { # <PATH>
       *) msg " >>> listed, but not allowed -- switch it on in the pane:"; render < "$WORK/row" | sed 's/^/    /' ;;
     esac
   fi
-  run "$c_open" "$FDA_PANE_URL" || err 00032 "could not open the Full Disk Access pane ($FDA_PANE_URL)"
-  run "$c_open" -R "$_p" || err 00033 "could not show '$_p' in Finder"
+  run "$c_open" "$FDA_PANE_URL" || err 00033 "could not open the Full Disk Access pane ($FDA_PANE_URL)"
+  run "$c_open" -R "$_p" || err 00034 "could not show '$_p' in Finder"
   say " >>> Full Disk Access is open, and $_p is selected in Finder:"
   say "    > drag it into the list (or: +, then Cmd-Shift-G, paste the path)"
   if [ -t 0 ] && [ -r /dev/tty ]; then
@@ -480,7 +553,7 @@ cmd_add() { # <PATH>
     read -r _x < /dev/tty
     grants_to "$WORK/all"
     awk -F '\t' -v c="$_p" '$2 == "1" && $3 == c && $4 == "allowed[2]"' "$WORK/all" > "$WORK/row"
-    [ -s "$WORK/row" ] || err 00034 "'$_p' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- drag it in, then $US list"
+    [ -s "$WORK/row" ] || err 00035 "'$_p' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- drag it in, then $US list"
     msg "granted:"; render < "$WORK/row" | sed 's/^/    /'
   else
     say "--> then check: $US list"
@@ -494,14 +567,14 @@ ids_to() { # <FILE> [ID...]
   if [ $# -gt 0 ]; then
     printf '%s\n' "$@" > "$_f"
   elif [ -t 0 ]; then
-    err 00035 "no IDs: give them as arguments, or pipe them in ($US list | grep ... | cut -f 1 | $US remove)"
+    err 00036 "no IDs: give them as arguments, or pipe them in ($US list | grep ... | cut -f 1 | $US remove)"
   else
     awk 'NF { print $1 }' > "$_f"
   fi
   while IFS= read -r _i; do
     case "$_i" in
       [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-      *) err 00036 "'$_i' is not an ID -- IDs are the first column of '$US list' -- nothing was changed" ;;
+      *) err 00037 "'$_i' is not an ID -- IDs are the first column of '$US list' -- nothing was changed" ;;
     esac
   done < "$_f"
 }
@@ -516,25 +589,25 @@ cmd_remove() { # [go] [ID...]
   while IFS= read -r _i; do
     _m=$(awk -F '\t' -v i="$_i" '$1 == i' "$WORK/all")
     [ -n "$_m" ] || { _bad="$_bad $_i"; continue; }
-    [ "$(printf '%s\n' "$_m" | wc -l | tr -d ' ')" = "1" ] || err 00037 "ID $_i matches more than one grant -- nothing was changed; remove those in System Settings"
+    [ "$(printf '%s\n' "$_m" | wc -l | tr -d ' ')" = "1" ] || err 00038 "ID $_i matches more than one grant -- nothing was changed; remove those in System Settings"
     grep -qxF "$_m" "$WORK/sel" || printf '%s\n' "$_m" >> "$WORK/sel"
   done < "$WORK/ids"
-  [ -z "$_bad" ] || err 00038 "no such grant:$_bad -- nothing was changed ($US list shows the IDs)"
+  [ -z "$_bad" ] || err 00039 "no such grant:$_bad -- nothing was changed ($US list shows the IDs)"
   _k=$(wc -l < "$WORK/sel" | tr -d ' ')
   render < "$WORK/sel"
   if [ "$_go" = "0" ]; then
     say "--> nothing changed -- '$US remove go' with the same IDs takes these $_k grant(s) away"
     return 0
   fi
-  delete_grants "$WORK/sel"
-  msg "removed $_k grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE"
+  take_away "$WORK/sel"
+  msg "removed $_k grant(s) $TOOK -- TCC.db backup: $BACKUP_FILE"
 }
 
 # The GONE grants -- the one class safe to take away without looking: nothing
 # is left that the grant could apply to. The same delete path as remove.
 cmd_cleanup() { # [go]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 0 ] || err 00039 "cleanup takes no IDs -- '$US remove' takes some"
+  [ $# -eq 0 ] || err 00040 "cleanup takes no IDs -- '$US remove' takes some"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
   awk -F '\t' '$5 ~ /^GONE/' "$WORK/all" > "$WORK/sel"
@@ -548,13 +621,13 @@ cmd_cleanup() { # [go]
     say "--> nothing changed -- '$US cleanup go' takes these $_k GONE grant(s) away"
     return 0
   fi
-  delete_grants "$WORK/sel"
-  msg "cleaned up $_k GONE grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE"
+  take_away "$WORK/sel"
+  msg "cleaned up $_k GONE grant(s) $TOOK -- TCC.db backup: $BACKUP_FILE"
 }
 
 cmd_reset() { # [go]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 0 ] || err 00040 "reset takes no IDs -- '$US remove' takes some"
+  [ $# -eq 0 ] || err 00041 "reset takes no IDs -- '$US remove' takes some"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
   _k=$(wc -l < "$WORK/all" | tr -d ' ')
@@ -567,11 +640,17 @@ cmd_reset() { # [go]
     return 0
   fi
   BACKUP_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p "$BACKUP_DIR" || err 00041 "cannot create BACKUP_DIR '$BACKUP_DIR'"
+  mkdir -p "$BACKUP_DIR" || err 00042 "cannot create BACKUP_DIR '$BACKUP_DIR'"
   _l="$BACKUP_DIR/list.$BACKUP_STAMP.txt"
-  VRB=1 render < "$WORK/all" > "$_l" || err 00042 "cannot save the list to '$_l' -- nothing was changed"
-  delete_grants "$WORK/all"
-  msg "took away $_k grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE, the list: $_l"
+  VRB=1 render < "$WORK/all" > "$_l" || err 00043 "cannot save the list to '$_l' -- nothing was changed"
+  backup_tcc
+  # macOS's own bulk command: no app lookup, no writable TCC.db needed.
+  PHASE="taking all grants away -- TCC.db backup: $BACKUP_FILE, the list: $_l"
+  [ "$VRB" = "1" ] && printf ' >>> %s reset SystemPolicyAllFiles\n' "$c_tccutil"
+  "$c_tccutil" reset SystemPolicyAllFiles < /dev/null > "$WORK/tccutil.out" 2>&1; _rc=$?
+  [ "$_rc" = "0" ] || err 00044 "tccutil reset SystemPolicyAllFiles failed [rc $_rc]: $(cat "$WORK/tccutil.out") -- backup: $BACKUP_FILE"
+  msg "took away all $_k grant(s) [tccutil rc $_rc] -- TCC.db backup: $BACKUP_FILE, the list: $_l"
+  msg "    > not checked here: this Terminal lost its grant too -- give it back, then $US list"
   msg " >>> to give back what had been allowed:"
   awk -F '\t' '$4 == "allowed[2]" && $5 !~ /^GONE/' "$WORK/all" > "$WORK/back"
   while IFS="$TAB" read -r _i _t _c _rest; do
@@ -628,7 +707,7 @@ int main(int argc, char **argv) {
 
     rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
     if (rc != 0) {
-        fprintf(stderr, "ERROR 00043 [70]: my-fda." MY_FDA_NAME ": cannot start %s: %s\n",
+        fprintf(stderr, "ERROR 00045 [70]: my-fda." MY_FDA_NAME ": cannot start %s: %s\n",
                 MY_FDA_TARGET, strerror(rc));
         return 70;
     }
@@ -636,7 +715,7 @@ int main(int argc, char **argv) {
 
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
-            fprintf(stderr, "ERROR 00044 [70]: my-fda." MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            fprintf(stderr, "ERROR 00046 [70]: my-fda." MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
             return 70;
         }
     }
@@ -653,7 +732,7 @@ marker_of() { # <launcher>
 
 check_name() { # <NAME>
   case "$1" in
-    ""|*[!A-Za-z0-9._-]*) err 00045 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+    ""|*[!A-Za-z0-9._-]*) err 00047 "name '$1': letters, digits, '.', '_' and '-' only" ;;
   esac
 }
 
@@ -671,39 +750,39 @@ daemons_to() { # <FILE>
 }
 
 cmd_create() { # <NAME> <TARGET>
-  [ $# -eq 2 ] || err 00046 "usage: $US create <NAME> <TARGET>"
+  [ $# -eq 2 ] || err 00048 "usage: $US create <NAME> <TARGET>"
   check_name "$1"
   _t=$2
   _l="$HELPER_DIR/my-fda.$1"
-  case "$_t" in /*) ;; *) err 00047 "target '$_t' must be an absolute path" ;; esac
-  case "$_t" in *\"*|*\\*) err 00048 "target '$_t': no '\"' or '\\' in the path" ;; esac
-  [ -f "$_t" ] && [ -x "$_t" ] || err 00049 "target '$_t' is not an executable file"
+  case "$_t" in /*) ;; *) err 00049 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00050 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00051 "target '$_t' is not an executable file"
   for _cel in $BREW_CELLARS; do
     case "$_t" in "$_cel"/*)
-      err 00050 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+      err 00052 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
     esac
   done
   for _sh in $SHELLS; do
-    [ "$_t" = "$_sh" ] && err 00051 "target '$_t' is a shell: every script it runs would get full disk access"
+    [ "$_t" = "$_sh" ] && err 00053 "target '$_t' is a shell: every script it runs would get full disk access"
   done
-  [ -e "$_l" ] && err 00052 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  [ -e "$_l" ] && err 00054 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00053 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00055 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00054 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00056 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
   run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00055 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00057 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00056 "the built launcher does not carry its target marker -- not installed"
+    || err 00058 "the built launcher does not carry its target marker -- not installed"
   if [ "$(id -u)" = "0" ]; then run install -m 700 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 700 "$WORK/launcher" "$_l"; fi || err 00057 "cannot install '$_l'"
+  else run install -m 700 "$WORK/launcher" "$_l"; fi || err 00059 "cannot install '$_l'"
   msg "created $_l -> $_t [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it, and $US test $1"
 }
@@ -712,12 +791,12 @@ cmd_create() { # <NAME> <TARGET>
 launcher_of() { # <NAME>
   check_name "$1"
   _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00058 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00060 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00059 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00061 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -760,17 +839,17 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00060 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00062 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00061 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00062 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00063 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00064 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00063 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00065 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -782,7 +861,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00064 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00066 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -797,12 +876,11 @@ cmd_destroy() { # [go] <NAME>
     say "--> nothing changed -- '$US destroy go $1' deletes the launcher and its grant"
     return 0
   fi
-  DELETED=0
-  [ -s "$WORK/sel" ] && delete_grants "$WORK/sel"
+  [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00065 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00067 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
-    msg "destroyed $_l [grant rows deleted $DELETED] -- TCC.db backup: $BACKUP_FILE"
+    msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
     msg "destroyed $_l [it had no grant]"
   fi
@@ -841,8 +919,18 @@ t_world() {
     '  *com.known.app*) echo /Applications/Known.app ;; esac' > "$T_DIR/stub/mdfind"
   printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/open.log'" > "$T_DIR/stub/open"
   printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/launchctl.log'" > "$T_DIR/stub/launchctl"
+  # tccutil as macado showed it: it knows installed apps only (rc 64 for any
+  # other id); with no id it takes every grant of the service.
+  # shellcheck disable=SC2016  # the stub expands $1..$3 when IT runs
+  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/tccutil.log'" \
+    '[ "$1" = reset ] && [ "$2" = SystemPolicyAllFiles ] || exit 64' \
+    "[ -n \"\$3\" ] || exec /usr/bin/sqlite3 '$T_DIR/TCC.db' \"delete from access where service='$SERVICE';\"" \
+    'case "$3" in com.known.app|com.apple.*) ;; *) echo "tccutil: No such bundle identifier \"$3\"" >&2; exit 64 ;; esac' \
+    "exec /usr/bin/sqlite3 '$T_DIR/TCC.db' \"delete from access where service='$SERVICE' and client_type=0 and client='\$3';\"" \
+    > "$T_DIR/stub/tccutil"
   chmod 755 "$T_DIR/stub/"*
   c_mdfind="$T_DIR/stub/mdfind"; c_open="$T_DIR/stub/open"; c_launchctl="$T_DIR/stub/launchctl"
+  c_tccutil="$T_DIR/stub/tccutil"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
   # shellcheck disable=SC2329  # called through need_root
   is_root() { true; }
@@ -929,7 +1017,7 @@ t_remove_go_takes_only_the_named_and_backs_up() {
   _bk=$(find "$BACKUP_DIR" -name 'TCC.db.*' 2>/dev/null | head -n 1)
   _bn=$("$c_sqlite3" "$_bk" "select count(*) from access where service='$SERVICE';" 2>/dev/null)
   if [ "$_left" = "$T_DIR/bin/tool com.known.app " ] && [ "$_cam" = "1" ] && [ "$_bn" = "3" ] \
-     && case "$_o" in *"removed 1 grant(s) [rows deleted 1, remaining 0]"*) true ;; *) false ;; esac
+     && case "$_o" in *"removed 1 grant(s) [tccutil 0, sqlite 1, by hand 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "left '$_left' cam $_cam backup $_bn, '$_o'"; fi
 }
 t_remove_reads_ids_from_a_list_pipe() {
@@ -961,6 +1049,34 @@ t_remove_quote_in_client_deletes_that_one() {
   _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
   if [ "$_left" = "$T_DIR/it" ]; then t_pass; else t_fail "left '$_left', '$_o'"; fi
 }
+t_installed_app_goes_through_tccutil() {
+  t_grant 0 com.known.app; t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_remove go "$(t_id 0 com.known.app)" 2>&1)
+  _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
+  _log=$(cat "$T_DIR/stub/tccutil.log" 2>/dev/null)
+  if [ "$_left" = "$T_DIR/bin/tool" ] && [ "$_log" = "reset SystemPolicyAllFiles com.known.app" ] && [ ! -e "$WORK/delete.sql" ] \
+     && case "$_o" in *"[tccutil 1, sqlite 0, by hand 0; remaining 0]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "left '$_left' tccutil '$_log', '$_o'"; fi
+}
+t_gone_app_falls_back_to_sqlite() {
+  t_grant 0 com.vanished.app
+  _o=$(cmd_cleanup go 2>&1)
+  _log=$(cat "$T_DIR/stub/tccutil.log" 2>/dev/null)
+  if [ "$(t_count)" = "0" ] && [ "$_log" = "reset SystemPolicyAllFiles com.vanished.app" ] \
+     && case "$_o" in *"[tccutil 0, sqlite 1, by hand 0; remaining 0]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "count $(t_count) tccutil '$_log', '$_o'"; fi
+}
+t_readonly_db_guides_and_fails() {
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
+  t_grant 1 "$T_DIR/nope"; t_grant 0 com.vanished.app
+  chmod 444 "$TCC_DB"
+  _o=$(cmd_cleanup go < /dev/null 2>&1); _rc=$?
+  chmod 644 "$TCC_DB"
+  _pane=$(cat "$T_DIR/stub/open.log" 2>/dev/null)
+  if [ "$_rc" != "0" ] && [ "$(t_count)" = "2" ] && [ "$_pane" = "x-test-pane" ] \
+     && case "$_o" in *"cannot be written here"*"2 grant(s) still there [tccutil 0, sqlite 0, by hand 0; remaining 2]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "rc $_rc count $(t_count) pane '$_pane', '$_o'"; fi
+}
 t_cleanup_without_go_changes_nothing() {
   t_grant 1 "$T_DIR/nope"
   _o=$(cmd_cleanup 2>&1)
@@ -973,7 +1089,7 @@ t_cleanup_go_takes_only_the_gone() {
   _o=$(cmd_cleanup go 2>&1)
   _left=$("$c_sqlite3" "$TCC_DB" "select client from access order by client;" | tr '\n' ' ')
   if [ "$_left" = "/bin/sh $T_DIR/bin/tool com.apple.sshd-keygen-wrapper com.known.app " ] \
-     && case "$_o" in *"cleaned up 2 GONE grant(s) [rows deleted 2, remaining 0]"*) true ;; *) false ;; esac
+     && case "$_o" in *"cleaned up 2 GONE grant(s) [tccutil 0, sqlite 2, by hand 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "left '$_left', '$_o'"; fi
 }
 t_cleanup_with_nothing_gone_is_nothing_to_do() {
@@ -987,6 +1103,8 @@ t_reset_go_takes_all_and_saves_the_list() {
   _o=$(cmd_reset go 2>&1)
   _l=$(find "$BACKUP_DIR" -name 'list.*.txt' 2>/dev/null)
   if [ "$(t_count)" = "0" ] && [ "$("$c_sqlite3" "$TCC_DB" "select count(*) from access;")" = "1" ] \
+     && [ "$(cat "$T_DIR/stub/tccutil.log" 2>/dev/null)" = "reset SystemPolicyAllFiles" ] \
+     && [ -n "$(find "$BACKUP_DIR" -name 'TCC.db.*' 2>/dev/null)" ] \
      && [ "$(wc -l < "$_l" | tr -d ' ')" = "3" ] \
      && case "$_o" in *"add $T_DIR/bin/tool"*) true ;; *) false ;; esac \
      && case "$_o" in *"add $T_DIR/nope"*) false ;; *) true ;; esac
@@ -1135,6 +1253,8 @@ run_tests() { # [FILTER]
                 t_remove_reads_ids_from_a_list_pipe t_remove_the_documented_denied_pipe \
                 t_remove_empty_pipe_is_nothing_to_do \
                 t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
+                t_installed_app_goes_through_tccutil t_gone_app_falls_back_to_sqlite \
+                t_readonly_db_guides_and_fails \
                 t_cleanup_without_go_changes_nothing t_cleanup_go_takes_only_the_gone \
                 t_cleanup_with_nothing_gone_is_nothing_to_do \
                 t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
@@ -1167,14 +1287,14 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00066 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00068 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
     --list|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00067 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00068 "unknown option '$_a' (--help)" ;;
+                      err 00069 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00070 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -1183,14 +1303,14 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00069 "no such command; you mean \`$US remove\`" ;;
+  rm)  err 00071 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00070 "unknown command '$CMD' (--help)" ;;
+  *)   err 00072 "unknown command '$CMD' (--help)" ;;
 esac
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00071 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00073 "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 
