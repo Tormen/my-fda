@@ -3,16 +3,21 @@
 #
 # macOS ties a Full Disk Access grant to a binary's path and contents. A
 # Homebrew binary changes both on every upgrade, so its grant silently stops
-# applying. my-fda keeps the grants short and stable; today it LISTS them and
-# says which ones are stale or will break (add/remove/status/test: see
-# DESIGN.local.md).
+# applying. my-fda lists the grants and says which are stale, takes them
+# away, and builds LAUNCHERS: tiny programs that hold the grant for a root
+# job and never change, so the grant lasts.
 
-SCRIPT_VERSION="0.1"
-SCRIPT_COMMIT=""
+SCRIPT_VERSION="0.2"
+SCRIPT_COMMIT="d15db5e"
+SCRIPT_RELEASE=""
 
 US="${0##*/}"
 QUIET=0; VRB=0
 CONFIG_ARG=""
+TAB=$(printf '\t')
+SERVICE="kTCCServiceSystemPolicyAllFiles"
+WORK=""
+PHASE="starting -- nothing was changed"
 
 err() { # <code> [text]
   _c="$1"; shift
@@ -20,7 +25,23 @@ err() { # <code> [text]
   exit 1
 }
 
-msg() { [ "$QUIET" = "1" ] || printf '%s\n' "$*"; }
+msg() { [ "$QUIET" = "1" ] || printf '%s\n' "$*"; }   # standard output; -Q silences it
+say() { printf '%s\n' "$*"; }                          # a plan a destructive step depends on: never silenced
+warn() { printf '%s\n' "$*" 1>&2; }
+
+# Echo a command under -V, then run it: one source for both.
+run() {
+  [ "$VRB" = "1" ] && printf ' >>> %s\n' "$*"
+  "$@"
+}
+
+is_root() { [ "$(id -u)" = "0" ]; }
+
+need_root() {
+  is_root && return 0
+  printf '%s\n' "needs root -- rerun under sudo:" "    sudo $0 $ARGS_TEXT" 1>&2
+  exit 1
+}
 
 # The real file behind $0 -- /LINKS/sbin/my-fda is a link or a copy.
 self_path() {
@@ -31,44 +52,137 @@ self_path() {
   done
   printf '%s\n' "$_p"
 }
+self_dir() { _sd=$(self_path); _sd=$(cd "${_sd%/*}" 2>/dev/null && pwd -P) && printf '%s\n' "$_sd"; }
+
+# git is asked only where my-fda OWNS the repository: a copy inside another
+# repo (the container that mirrors it) would report THAT repo's tags.
+own_git() {
+  _og=$(self_dir)
+  [ -n "$_og" ] && [ "$(git -c safe.directory='*' -C "$_og" rev-parse --show-toplevel 2>/dev/null)" = "$_og" ]
+}
 
 version() {
   _b=$(shasum -a 256 "$(self_path)" | awk '{ print substr($1, 1, 12) }')
-  if [ -n "$SCRIPT_COMMIT" ]; then
-    printf '%s %s (commit %s, build %s)\n' "$US" "$SCRIPT_VERSION" "$SCRIPT_COMMIT" "$_b"
-  else
-    printf '%s %s (build %s, unstamped)\n' "$US" "$SCRIPT_VERSION" "$_b"
+  _d=""; _c=""
+  if own_git; then
+    _d=$(git -c safe.directory='*' -C "$(self_dir)" describe --tags --long 2>/dev/null)
+    _c=$(git -c safe.directory='*' -C "$(self_dir)" rev-parse --short HEAD 2>/dev/null)
   fi
+  [ -z "$_d" ] && [ -z "$_c" ] && [ -n "$SCRIPT_COMMIT" ] && _d=$SCRIPT_RELEASE
+  case "$_d" in
+    *-*-g*)
+      _t=${_d%-*-g*}
+      _n=${_d%-g*}; _n=${_n##*-}
+      if [ "$_n" = "0" ]; then
+        printf '%s %s (%s: the %s tag, build %s)\n' "$US" "$SCRIPT_VERSION" "$_d" "$_t" "$_b"
+      else
+        printf '%s %s+%s (%s: %s commit(s) past %s, unreleased, build %s)\n' \
+          "$US" "$SCRIPT_VERSION" "$_n" "$_d" "$_n" "$_t" "$_b"
+      fi ;;
+    *)
+      if [ -n "$_c" ]; then
+        printf '%s %s (commit %s, no release tag yet, build %s)\n' "$US" "$SCRIPT_VERSION" "$_c" "$_b"
+      elif [ -n "$SCRIPT_COMMIT" ]; then
+        printf '%s %s (commit %s, build %s)\n' "$US" "$SCRIPT_VERSION" "$SCRIPT_COMMIT" "$_b"
+      else
+        printf '%s %s (build %s, unstamped)\n' "$US" "$SCRIPT_VERSION" "$_b"
+      fi ;;
+  esac
+}
+
+# Record HEAD and git's describe string in this file, then AMEND the commit
+# they belong to. After committing, BEFORE pushing; tag afterwards. The
+# stamped sha lags HEAD by one: amending changes it, and that is expected.
+stamp_version() {
+  _sv_dir=$(self_dir) || err 00001 "--stamp-version: cannot resolve my own directory"
+  _sv_self="$_sv_dir/my-fda"
+  own_git || err 00002 "--stamp-version: $_sv_dir is not the top of my-fda's own checkout"
+  _sv_sha=$(git -C "$_sv_dir" rev-parse --short HEAD 2>/dev/null)
+  [ -n "$_sv_sha" ] || err 00003 "--stamp-version: no commit to stamp from"
+  if git -C "$_sv_dir" rev-parse -q --verify '@{upstream}' >/dev/null 2>&1 \
+     && git -C "$_sv_dir" merge-base --is-ancestor HEAD '@{upstream}' 2>/dev/null; then
+    err 00004 "--stamp-version: HEAD $_sv_sha is already pushed -- amending would rewrite published history. Commit, stamp, THEN push"
+  fi
+  [ -n "$(git -C "$_sv_dir" show --name-only --format= HEAD -- my-fda 2>/dev/null)" ] \
+    || err 00005 "--stamp-version: HEAD does not touch my-fda -- commit it first"
+  _sv_staged=$(git -C "$_sv_dir" diff --cached --name-only 2>/dev/null)
+  [ -z "$_sv_staged" ] || err 00006 "--stamp-version: something is staged -- the amend would fold it in: $_sv_staged"
+  git -C "$_sv_dir" diff --quiet -- my-fda 2>/dev/null || err 00007 "--stamp-version: my-fda has uncommitted edits -- commit them first"
+  _sv_desc=$(git -c safe.directory='*' -C "$_sv_dir" describe --tags --long 2>/dev/null)
+  _sv_tmp=$(mktemp "${TMPDIR:-/tmp}/my-fda.stamp.XXXXXX") || err 00008 "--stamp-version: mktemp failed"
+  cp -p "$_sv_self" "$_sv_tmp" 2>/dev/null
+  sed -e "s|^SCRIPT_COMMIT=.*|SCRIPT_COMMIT=\"$_sv_sha\"|" \
+      -e "s|^SCRIPT_RELEASE=.*|SCRIPT_RELEASE=\"$_sv_desc\"|" "$_sv_self" > "$_sv_tmp" \
+    || { rm -f "$_sv_tmp"; err 00009 "--stamp-version: could not rewrite the stamp"; }
+  grep -q "^SCRIPT_COMMIT=\"$_sv_sha\"\$" "$_sv_tmp" \
+    || { rm -f "$_sv_tmp"; err 00010 "--stamp-version: the rewritten file carries no stamp -- refusing to install it"; }
+  mv -f "$_sv_tmp" "$_sv_self" || { rm -f "$_sv_tmp"; err 00011 "--stamp-version: could not install the stamped file"; }
+  git -C "$_sv_dir" add -- my-fda || err 00012 "--stamp-version: git add failed"
+  git -C "$_sv_dir" commit -q --amend --no-edit || err 00013 "--stamp-version: git amend failed"
+  printf 'stamped SCRIPT_COMMIT=%s SCRIPT_RELEASE=%s -- HEAD is now %s\n' \
+    "$_sv_sha" "${_sv_desc:-<no tag yet>}" "$(git -C "$_sv_dir" rev-parse --short HEAD)"
+  printf '  > the stamped sha lags HEAD by one: amending changes it. Tag AFTER this.\n'
 }
 
 usage() {
   cat <<_EOF
-usage: $US [-Q] [-V] [--config <FILE>] <COMMAND>
+usage: $US [-Q] [-V] [--config <FILE>] <COMMAND> [<ARGS>]
 
 Full Disk Access for root jobs, kept stable across Homebrew upgrades.
 
-COMMANDS
-  list          every Full Disk Access grant, one line each: the client (a
-                path or an app id), allowed[2] / denied[0] with the raw
-                value, and what to do with it:
-                  GONE -> remove        the path no longer exists
+GRANTS -- the "+" and "-" of System Settings > Full Disk Access
+  list          every grant, one line each: an ID, a TAB, the client (a path
+                or an app id), allowed[2] / denied[0] with the raw value, and
+                what to do with it:
+                  GONE -> remove        the path or the app no longer exists
                   Homebrew version path: breaks on upgrade -> my-fda
                   a shell: every script it runs gets full disk access -> remove
-                Needs root, run from a Terminal that has Full Disk Access
-                itself: the permission database is protected.
-  add, remove, status, test
-                designed, not built yet (DESIGN.local.md)
+                Apple's own app ids are never called GONE: Spotlight does not
+                find them all.
+  add <PATH>    "+": opens the Full Disk Access pane and shows PATH in Finder
+                to drag in (macOS grants only on a click), then checks that
+                it arrived
+  remove [go] [<ID>...]
+                "-": shows the grants it would take away; with go, takes them
+                away. IDs as arguments, or one per line on stdin (the first
+                column of a list line is enough):
+                  $US list | grep GONE | cut -f 1 | $US remove go
+  reset [go]    all grants at once: shows them; with go, takes them all away
+                -- the Terminal running this loses its grant too -- and says
+                what to give back
+                Every change first backs up TCC.db (BACKUP_DIR), then deletes
+                in one transaction and checks nothing is left.
+
+LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda.<NAME>, root:wheel 700
+  create <NAME> <TARGET>
+                build a launcher that runs TARGET (a script, or a Homebrew
+                binary by its stable path such as /opt/homebrew/bin/rsync)
+                with all its arguments; needs the Command Line Tools (cc).
+                Never over an existing one: a rebuild loses its grant.
+  destroy [go] <NAME>
+                shows the launcher, its target, its grant and the daemon(s)
+                using it; with go, deletes the launcher and its grant
+  status [<NAME>]
+                each launcher: its target, its grant, the LaunchDaemon that
+                runs it
+  test <NAME>   starts that LaunchDaemon through launchd -- the only run that
+                proves the grant (a run from a Terminal uses the Terminal's)
+
+Every command needs root, run from a Terminal that has Full Disk Access
+itself: the permission database is protected.
 
 OPTIONS
-  -V, --verbose         adds the date of each grant
-  -Q, --quiet           no summary line; errors still go to stderr
+  -V, --verbose         also: each command before it runs, the date of each
+                        grant, an app's path
+  -Q, --quiet           nothing but errors -- and the plans that go acts on
   --config <FILE>       use this config, bypassing the search
   --create-config [<FILE>]
                         print the default config, or write it to <FILE>
                         (never over an existing one)
   --run-tests [<FILTER>]
                         run the built-in tests (name substring)
-  --version             version and build id
+  --stamp-version       record the commit in this file (maintainer)
+  --version             version, git describe, build id
   -h, --help            this help
 
 CONFIG (first found wins)
@@ -85,8 +199,15 @@ default_config() {
 # The system-wide permission database (Full Disk Access lives here).
 TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
 
-# The sqlite3 that reads it.
-c_sqlite3="/usr/bin/sqlite3"
+# Where each change first backs up TCC.db (and reset saves the list).
+BACKUP_DIR="/var/lib/mine/$(id -un)/my-fda"
+
+# Where launchers are installed, and where the daemons that run them live.
+HELPER_DIR="/Library/PrivilegedHelperTools"
+LAUNCHD_DIR="/Library/LaunchDaemons"
+
+# The Full Disk Access pane, for add.
+FDA_PANE_URL="x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
 
 # Where Homebrew keeps its versioned binaries: a grant on a path under one
 # of these breaks on the next upgrade of that formula.
@@ -94,8 +215,22 @@ BREW_CELLARS="/opt/homebrew/Cellar /usr/local/Cellar"
 
 # Shells: a grant on one gives full disk access to every script it runs.
 SHELLS="/bin/sh /bin/bash /bin/zsh /bin/dash /bin/ksh /bin/tcsh /bin/csh"
+
+# The commands my-fda runs.
+c_sqlite3="/usr/bin/sqlite3"
+c_md5="/sbin/md5"
+c_mdfind="/usr/bin/mdfind"
+c_open="/usr/bin/open"
+c_killall="/usr/bin/killall"
+c_launchctl="/bin/launchctl"
+c_plutil="/usr/bin/plutil"
+c_cc="/usr/bin/cc"
+c_xcode_select="/usr/bin/xcode-select"
 _EOF
 }
+
+CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -130,31 +265,52 @@ _EOF
     } 1>&2
     exit 1
   fi
-  [ -r "$_cf" ] || err 00001 "config '$_cf' is not readable"
+  [ -r "$_cf" ] || err 00014 "config '$_cf' is not readable"
   # shellcheck disable=SC1090  # the config path is chosen at runtime
-  . "$_cf" || err 00002 "config '$_cf' failed to load"
+  . "$_cf" || err 00015 "config '$_cf' failed to load"
   CONFIG_FILE="$_cf"
+  _miss=""
+  for _k in $CONFIG_KEYS; do
+    eval "_v=\${$_k:-}"
+    [ -n "$_v" ] || _miss="$_miss $_k"
+  done
+  [ -z "$_miss" ] || err 00016 "config '$_cf' lacks:$_miss -- '$US --create-config' shows them with their defaults"
 }
 
 create_config() { # [FILE]
   if [ -z "$1" ]; then default_config; return 0; fi
-  [ -e "$1" ] && err 00003 "'$1' exists -- not overwritten"
-  default_config > "$1" || err 00004 "cannot write '$1'"
+  [ -e "$1" ] && err 00017 "'$1' exists -- not overwritten"
+  default_config > "$1" || err 00018 "cannot write '$1'"
   msg " >>> default config written to $1"
 }
 
+############################################################## grants
+
+# A grant's ID: 6 hex characters of its client, the same on every run.
+grant_id() { # <type> <client>
+  "$c_md5" -q -s "$1 $2" | cut -c 1-6
+}
+
+# The app's path, as Spotlight knows it; empty when it knows none.
+app_path() { # <bundle id>
+  case "$1" in *"'"*) return 0 ;; esac
+  "$c_mdfind" "kMDItemCFBundleIdentifier == '$1'" 2>/dev/null | head -n 1
+}
+
 # One grant per line on stdin: type<TAB>client<TAB>auth<TAB>date.
-# Out: client<TAB>state<TAB>note<TAB>date -- the note says what to do.
+# Out: id<TAB>type<TAB>client<TAB>state<TAB>note<TAB>date<TAB>app path --
+# never an empty field ("-"): a TAB is IFS whitespace, and read would
+# collapse two of them into one.
 classify() {
-  _tab=$(printf '\t')
-  while IFS="$_tab" read -r _t _c _a _d; do
+  _spot=""
+  while IFS="$TAB" read -r _t _c _a _d; do
     [ -n "$_c" ] || continue
     case "$_a" in
       2) _s="allowed[2]" ;;
       0) _s="denied[0]" ;;
       *) _s="other[$_a]" ;;
     esac
-    _n="-"
+    _n="-"; _x=""
     if [ "$_t" = "1" ]; then
       if [ ! -e "$_c" ]; then
         _n="GONE -> remove"
@@ -167,67 +323,465 @@ classify() {
         done
       fi
     elif [ "$_t" = "0" ]; then
-      _n="app"
+      # Spotlight off would make every app look gone: ask it about Finder first.
+      if [ -z "$_spot" ]; then
+        if [ -n "$(app_path com.apple.finder)" ]; then _spot=on; else _spot=off; fi
+      fi
+      _x=$(app_path "$_c")
+      if [ -n "$_x" ]; then
+        _n="app"
+      elif [ "$_spot" = "off" ]; then
+        _n="app (not checked: Spotlight finds no apps)"
+      else
+        case "$_c" in
+          com.apple.*) _n="app (Apple's own, not found by Spotlight: kept)" ;;
+          *)           _n="GONE -> remove" ;;
+        esac
+      fi
     else
       _n="unknown client type [$_t]"
     fi
-    printf '%s\t%s\t%s\t%s\n' "$_c" "$_s" "$_n" "$_d"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(grant_id "$_t" "$_c")" "$_t" "$_c" "$_s" "$_n" "${_d:--}" "${_x:--}"
   done
 }
 
-# Classified lines on stdin -> aligned table; the client (the key) first.
+# Classified lines on stdin -> the table: the ID and a TAB first, so that
+# `cut -f 1` returns it; -V adds the date and an app's path.
 render() {
   awk -F '\t' -v vrb="$VRB" '
-    { c[NR] = $1; s[NR] = $2; n[NR] = $3; d[NR] = $4; if (length($1) > w) w = length($1) }
+    { id[NR] = $1; c[NR] = $3; s[NR] = $4; n[NR] = $5; d[NR] = $6; x[NR] = $7
+      if (length($3) > w) w = length($3) }
     END {
       for (i = 1; i <= NR; i++) {
-        if (vrb == "1") printf "%-" w "s  %-11s  %-19s  %s\n", c[i], s[i], d[i], n[i]
-        else            printf "%-" w "s  %-11s  %s\n", c[i], s[i], n[i]
+        l = sprintf("%s\t%-" w "s  %-11s  ", id[i], c[i], s[i])
+        if (vrb == "1") l = l sprintf("%-19s  ", d[i])
+        l = l n[i]
+        if (vrb == "1" && x[i] != "-") l = l "  (" x[i] ")"
+        print l
       }
     }'
 }
 
-# Classified lines on stdin -> one summary line; the parts must add up.
+# Classified lines on stdin -> one summary line; the parts must add up. Its
+# words are lower case, so `list | grep GONE` never picks it up.
 summary() {
   awk -F '\t' '
     { rows++ }
-    $3 ~ /^GONE/     { gone++ }
-    $3 ~ /^Homebrew/ { brew++ }
-    $3 ~ /^a shell/  { shell++ }
-    $3 == "app"      { app++ }
+    $5 ~ /^GONE/     { gone++ }
+    $5 ~ /^Homebrew/ { brew++ }
+    $5 ~ /^a shell/  { shell++ }
+    $5 ~ /^app/      { app++ }
     END {
       other = rows - gone - brew - shell - app
-      printf "%d grant(s): %d GONE, %d on a Homebrew version path, %d shell(s), %d app(s), %d other [rows %d]\n",
+      printf "%d grant(s): %d gone, %d on a Homebrew version path, %d shell(s), %d app(s), %d other [rows %d]\n",
         rows, gone, brew, shell, app, other, rows
     }'
 }
 
-tcc_rows() {
-  # shellcheck disable=SC2154  # c_sqlite3 comes from the config
-  "$c_sqlite3" -separator "$(printf '\t')" "$TCC_DB" \
-    "select client_type, client, auth_value, datetime(last_modified,'unixepoch') from access where service='kTCCServiceSystemPolicyAllFiles' order by client;"
+# Every Full Disk Access grant, classified, into <FILE>.
+grants_to() { # <FILE>
+  [ -x "$c_sqlite3" ] || err 00019 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
+  if ! "$c_sqlite3" -readonly -separator "$TAB" "$TCC_DB" \
+       "select client_type, client, auth_value, datetime(last_modified,'unixepoch') from access where service='$SERVICE' order by client;" \
+       > "$WORK/rows" 2> "$WORK/rows.err"; then
+    _e=$(cat "$WORK/rows.err")
+    case "$_e" in
+      *"authorization denied"*|*"unable to open"*)
+        err 00020 "cannot read '$TCC_DB' ($_e) -- the Terminal running this needs Full Disk Access itself" ;;
+      *) err 00021 "sqlite3 failed on '$TCC_DB': $_e" ;;
+    esac
+  fi
+  classify < "$WORK/rows" > "$1"
+}
+
+sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
+
+# Back TCC.db up before a change: sqlite's own .backup, never cp -- tccd
+# holds the file open, and a copy can be torn.
+backup_tcc() {
+  [ -n "$BACKUP_STAMP" ] || BACKUP_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$BACKUP_DIR" || err 00022 "cannot create BACKUP_DIR '$BACKUP_DIR'"
+  chmod 700 "$BACKUP_DIR" || err 00023 "cannot chmod 700 '$BACKUP_DIR'"
+  BACKUP_FILE="$BACKUP_DIR/TCC.db.$BACKUP_STAMP"
+  [ -e "$BACKUP_FILE" ] && BACKUP_FILE="$BACKUP_FILE.$$"
+  run "$c_sqlite3" "$TCC_DB" ".backup '$BACKUP_FILE'" \
+    || err 00024 "backup of '$TCC_DB' to '$BACKUP_FILE' failed -- nothing was changed"
+  [ -s "$BACKUP_FILE" ] || err 00025 "backup '$BACKUP_FILE' is empty -- nothing was changed"
+}
+
+# Delete the grants listed in <FILE> (classified lines): back up, delete in
+# ONE transaction, count in the same session what is left, restart tccd.
+# The count comes from the session that deleted, so it works even when the
+# delete took away this Terminal's own grant.
+delete_grants() { # <FILE>
+  backup_tcc
+  _sql="$WORK/delete.sql"
+  {
+    echo "BEGIN;"
+    while IFS="$TAB" read -r _i _t _c _rest; do
+      case "$_t" in ""|*[!0-9]*) err 00026 "client type '$_t' of '$_c' is not a number -- nothing was changed" ;; esac
+      printf "DELETE FROM access WHERE service='%s' AND client_type=%s AND client='%s';\n" "$SERVICE" "$_t" "$(sql_q "$_c")"
+    done < "$1"
+    echo "COMMIT;"
+    echo "SELECT total_changes();"
+    printf "SELECT count(*) FROM access WHERE service='%s' AND (0" "$SERVICE"
+    while IFS="$TAB" read -r _i _t _c _rest; do
+      printf " OR (client_type=%s AND client='%s')" "$_t" "$(sql_q "$_c")"
+    done < "$1"
+    echo ");"
+  } > "$_sql"
+  PHASE="deleting grants -- one transaction: it landed whole or not at all; TCC.db backup: $BACKUP_FILE"
+  [ "$VRB" = "1" ] && printf ' >>> %s -bail %s < %s\n' "$c_sqlite3" "$TCC_DB" "$_sql"
+  _out=$("$c_sqlite3" -bail "$TCC_DB" < "$_sql" 2>&1) \
+    || err 00027 "sqlite3 delete failed: $_out -- the transaction did not land; backup: $BACKUP_FILE"
+  DELETED=$(printf '%s\n' "$_out" | sed -n 1p)
+  REMAINING=$(printf '%s\n' "$_out" | sed -n 2p)
+  [ "$REMAINING" = "0" ] || err 00028 "grants still there after the delete [rows deleted $DELETED, remaining $REMAINING] -- backup: $BACKUP_FILE"
+  run "$c_killall" tccd > /dev/null 2>&1 \
+    || warn "    > could not restart tccd ($c_killall tccd) -- it may show the old grants until it restarts"
 }
 
 cmd_list() {
-  if [ "$(id -u)" != "0" ]; then
-    printf '%s\n' "needs root -- rerun under sudo:" "    sudo $0 list" 1>&2
-    exit 1
-  fi
-  [ -x "$c_sqlite3" ] || err 00005 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
-  _tmp=$(mktemp /tmp/my-fda.XXXXXX) || err 00006 "mktemp failed"
-  _rows=$(mktemp /tmp/my-fda.XXXXXX) || err 00007 "mktemp failed"
-  if ! tcc_rows > "$_rows" 2> "$_tmp"; then
-    _e=$(cat "$_tmp"); rm -f "$_tmp" "$_rows"
-    case "$_e" in
-      *"authorization denied"*|*"unable to open"*)
-        err 00008 "cannot read '$TCC_DB' ($_e) -- the Terminal running this needs Full Disk Access itself" ;;
-      *) err 00009 "sqlite3 failed on '$TCC_DB': $_e" ;;
+  [ $# -eq 0 ] || err 00029 "list takes no arguments"
+  PHASE="reading the grants -- nothing was changed"
+  grants_to "$WORK/all"
+  render < "$WORK/all"
+  [ "$QUIET" = "1" ] || summary < "$WORK/all"
+}
+
+cmd_add() { # <PATH>
+  [ $# -eq 1 ] || err 00030 "add takes one path: $US add <PATH>"
+  _p=$1
+  case "$_p" in /*) ;; *) _p="$(pwd)/$_p" ;; esac
+  [ -e "$_p" ] || err 00031 "'$_p' does not exist"
+  for _cel in $BREW_CELLARS; do
+    case "$_p" in "$_cel"/*)
+      warn "    > a Homebrew version path: this grant breaks on the next upgrade -- a launcher lasts: $US create <NAME> <stable path>" ;;
+    esac
+  done
+  PHASE="reading the grants -- nothing was changed"
+  grants_to "$WORK/all"
+  awk -F '\t' -v c="$_p" '$2 == "1" && $3 == c' "$WORK/all" > "$WORK/row"
+  if [ -s "$WORK/row" ]; then
+    case "$(cut -f 4 "$WORK/row")" in
+      "allowed[2]") msg "already granted:"; render < "$WORK/row" | sed 's/^/    /'; return 0 ;;
+      *) msg " >>> listed, but not allowed -- switch it on in the pane:"; render < "$WORK/row" | sed 's/^/    /' ;;
     esac
   fi
-  classify < "$_rows" > "$_tmp"
-  render < "$_tmp"
-  [ "$QUIET" = "1" ] || summary < "$_tmp"
-  rm -f "$_tmp" "$_rows"
+  run "$c_open" "$FDA_PANE_URL" || err 00032 "could not open the Full Disk Access pane ($FDA_PANE_URL)"
+  run "$c_open" -R "$_p" || err 00033 "could not show '$_p' in Finder"
+  say " >>> Full Disk Access is open, and $_p is selected in Finder:"
+  say "    > drag it into the list (or: +, then Cmd-Shift-G, paste the path)"
+  if [ -t 0 ] && [ -r /dev/tty ]; then
+    PHASE="waiting for the grant to be dragged in -- nothing was changed by $US"
+    printf '    > press Return when it is in the list: '
+    read -r _x < /dev/tty
+    grants_to "$WORK/all"
+    awk -F '\t' -v c="$_p" '$2 == "1" && $3 == c && $4 == "allowed[2]"' "$WORK/all" > "$WORK/row"
+    [ -s "$WORK/row" ] || err 00034 "'$_p' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- drag it in, then $US list"
+    msg "granted:"; render < "$WORK/row" | sed 's/^/    /'
+  else
+    say "--> then check: $US list"
+  fi
+}
+
+# IDs from the arguments, or one per line on stdin -- the first word of each
+# line, so a whole `list` line works too. Every ID must be 6 hex characters.
+ids_to() { # <FILE> [ID...]
+  _f=$1; shift
+  if [ $# -gt 0 ]; then
+    printf '%s\n' "$@" > "$_f"
+  elif [ -t 0 ]; then
+    err 00035 "no IDs: give them as arguments, or pipe them in ($US list | grep GONE | cut -f 1 | $US remove)"
+  else
+    awk 'NF { print $1 }' > "$_f"
+  fi
+  while IFS= read -r _i; do
+    case "$_i" in
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+      *) err 00036 "'$_i' is not an ID -- IDs are the first column of '$US list' -- nothing was changed" ;;
+    esac
+  done < "$_f"
+}
+
+cmd_remove() { # [go] [ID...]
+  _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
+  ids_to "$WORK/ids" "$@"
+  if [ ! -s "$WORK/ids" ]; then msg "no IDs on stdin -- nothing to remove"; return 0; fi
+  PHASE="reading the grants -- nothing was changed"
+  grants_to "$WORK/all"
+  : > "$WORK/sel"; _bad=""
+  while IFS= read -r _i; do
+    _m=$(awk -F '\t' -v i="$_i" '$1 == i' "$WORK/all")
+    [ -n "$_m" ] || { _bad="$_bad $_i"; continue; }
+    [ "$(printf '%s\n' "$_m" | wc -l | tr -d ' ')" = "1" ] || err 00037 "ID $_i matches more than one grant -- nothing was changed; remove those in System Settings"
+    grep -qxF "$_m" "$WORK/sel" || printf '%s\n' "$_m" >> "$WORK/sel"
+  done < "$WORK/ids"
+  [ -z "$_bad" ] || err 00038 "no such grant:$_bad -- nothing was changed ($US list shows the IDs)"
+  _k=$(wc -l < "$WORK/sel" | tr -d ' ')
+  render < "$WORK/sel"
+  if [ "$_go" = "0" ]; then
+    say "--> nothing changed -- '$US remove go' with the same IDs takes these $_k grant(s) away"
+    return 0
+  fi
+  delete_grants "$WORK/sel"
+  msg "removed $_k grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE"
+}
+
+cmd_reset() { # [go]
+  _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
+  [ $# -eq 0 ] || err 00039 "reset takes no IDs -- '$US remove' takes some"
+  PHASE="reading the grants -- nothing was changed"
+  grants_to "$WORK/all"
+  _k=$(wc -l < "$WORK/all" | tr -d ' ')
+  if [ "$_k" = "0" ]; then msg "no grants -- nothing to reset"; return 0; fi
+  render < "$WORK/all"
+  say " >>> this takes away ALL $_k grant(s) -- the Terminal running this loses its grant too:"
+  say "    > give that one back first (System Settings > Full Disk Access), then $US list"
+  if [ "$_go" = "0" ]; then
+    say "--> nothing changed -- '$US reset go' does it"
+    return 0
+  fi
+  BACKUP_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$BACKUP_DIR" || err 00040 "cannot create BACKUP_DIR '$BACKUP_DIR'"
+  _l="$BACKUP_DIR/list.$BACKUP_STAMP.txt"
+  VRB=1 render < "$WORK/all" > "$_l" || err 00041 "cannot save the list to '$_l' -- nothing was changed"
+  delete_grants "$WORK/all"
+  msg "took away $_k grant(s) [rows deleted $DELETED, remaining $REMAINING] -- TCC.db backup: $BACKUP_FILE, the list: $_l"
+  msg " >>> to give back what had been allowed:"
+  awk -F '\t' '$4 == "allowed[2]" && $5 !~ /^GONE/' "$WORK/all" > "$WORK/back"
+  while IFS="$TAB" read -r _i _t _c _rest; do
+    if [ "$_t" = "1" ]; then msg "    > $US add $_c"
+    else msg "    > $_c: System Settings > Full Disk Access, +, the app"; fi
+  done < "$WORK/back"
+}
+
+############################################################## launchers
+
+# The launcher program. `create` compiles it with the target (and the name,
+# for its error lines) passed as -D on the cc command line; the marker
+# string is how `status` reads the target back out of the binary.
+launcher_c() {
+  cat <<'_EOF'
+/* my-fda launcher -- built by `my-fda create`, never edited by hand.
+ *
+ * A Full Disk Access grant sticks to one program's code. Granted to this
+ * launcher, it lasts, because the launcher never changes; the target it
+ * runs -- and all that runs -- is its child and counts as its.
+ *
+ * It SPAWNS the target and waits (instead of exec'ing it), so the process
+ * launchd started, which holds the grant, lives for the whole run. It
+ * passes on all arguments, exits with the target's status, and passes on
+ * SIGTERM/SIGINT/SIGHUP.
+ */
+#include <errno.h>
+#include <signal.h>
+#include <spawn.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/wait.h>
+
+#if !defined(MY_FDA_TARGET) || !defined(MY_FDA_NAME)
+#error "build with -DMY_FDA_TARGET='\"/path\"' -DMY_FDA_NAME='\"name\"'"
+#endif
+
+__attribute__((used)) static const char marker[] = "MY-FDA-TARGET=" MY_FDA_TARGET;
+
+extern char **environ;
+static volatile pid_t child = 0;
+
+static void forward(int sig) { if (child > 0) kill(child, sig); }
+
+int main(int argc, char **argv) {
+    pid_t pid;
+    int rc, st;
+
+    (void)argc;
+    argv[0] = (char *)MY_FDA_TARGET;
+    signal(SIGTERM, forward);
+    signal(SIGINT, forward);
+    signal(SIGHUP, forward);
+
+    rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
+    if (rc != 0) {
+        fprintf(stderr, "ERROR 00042 [70]: my-fda." MY_FDA_NAME ": cannot start %s: %s\n",
+                MY_FDA_TARGET, strerror(rc));
+        return 70;
+    }
+    child = pid;
+
+    while (waitpid(pid, &st, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr, "ERROR 00043 [70]: my-fda." MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            return 70;
+        }
+    }
+    if (WIFEXITED(st)) return WEXITSTATUS(st);
+    return 128 + WTERMSIG(st);
+}
+_EOF
+}
+
+# The target compiled into a launcher; empty when it carries no marker.
+marker_of() { # <launcher>
+  LC_ALL=C grep -a -o 'MY-FDA-TARGET=[[:print:]]*' "$1" 2>/dev/null | head -n 1 | sed 's/^MY-FDA-TARGET=//'
+}
+
+check_name() { # <NAME>
+  case "$1" in
+    ""|*[!A-Za-z0-9._-]*) err 00044 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+  esac
+}
+
+# Every LaunchDaemon's program: program<TAB>label<TAB>plist, into <FILE>.
+daemons_to() { # <FILE>
+  : > "$1"
+  for _pl in "$LAUNCHD_DIR"/*.plist; do
+    [ -f "$_pl" ] || continue
+    _pg=$("$c_plutil" -extract Program raw -o - "$_pl" 2>/dev/null) \
+      || _pg=$("$c_plutil" -extract ProgramArguments.0 raw -o - "$_pl" 2>/dev/null) \
+      || continue
+    _lb=$("$c_plutil" -extract Label raw -o - "$_pl" 2>/dev/null) || _lb="${_pl##*/}"
+    printf '%s\t%s\t%s\n' "$_pg" "$_lb" "$_pl" >> "$1"
+  done
+}
+
+cmd_create() { # <NAME> <TARGET>
+  [ $# -eq 2 ] || err 00045 "usage: $US create <NAME> <TARGET>"
+  check_name "$1"
+  _t=$2
+  _l="$HELPER_DIR/my-fda.$1"
+  case "$_t" in /*) ;; *) err 00046 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00047 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00048 "target '$_t' is not an executable file"
+  for _cel in $BREW_CELLARS; do
+    case "$_t" in "$_cel"/*)
+      err 00049 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+    esac
+  done
+  for _sh in $SHELLS; do
+    [ "$_t" = "$_sh" ] && err 00050 "target '$_t' is a shell: every script it runs would get full disk access"
+  done
+  [ -e "$_l" ] && err 00051 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
+    err 00052 "no compiler: needs the Command Line Tools -- xcode-select --install"
+  fi
+  if [ ! -d "$HELPER_DIR" ]; then
+    if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00053 "cannot create '$HELPER_DIR'"
+    msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
+  fi
+  PHASE="building the launcher -- nothing was installed yet"
+  launcher_c > "$WORK/launcher.c"
+  run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" \
+    -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
+    || err 00054 "cc failed: $(cat "$WORK/cc.log")"
+  [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
+    || err 00055 "the built launcher does not carry its target marker -- not installed"
+  if [ "$(id -u)" = "0" ]; then run install -m 700 -o root -g wheel "$WORK/launcher" "$_l"
+  else run install -m 700 "$WORK/launcher" "$_l"; fi || err 00056 "cannot install '$_l'"
+  msg "created $_l -> $_t [marker ok]"
+  msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it, and $US test $1"
+}
+
+# A launcher by name, or an error that names what exists.
+launcher_of() { # <NAME>
+  check_name "$1"
+  _lo="$HELPER_DIR/my-fda.$1"
+  [ -e "$_lo" ] || err 00057 "no launcher '$1' ($_lo) -- $US status lists them"
+  printf '%s\n' "$_lo"
+}
+
+cmd_status() { # [NAME]
+  [ $# -le 1 ] || err 00058 "usage: $US status [<NAME>]"
+  if [ $# -eq 1 ]; then
+    launcher_of "$1" > "$WORK/launchers" || exit 1
+  else
+    : > "$WORK/launchers"
+    for _f in "$HELPER_DIR"/my-fda.*; do
+      [ -e "$_f" ] && printf '%s\n' "$_f" >> "$WORK/launchers"
+    done
+  fi
+  if [ ! -s "$WORK/launchers" ]; then
+    msg "no launchers in $HELPER_DIR -- $US create <NAME> <TARGET> makes one"
+    return 0
+  fi
+  PHASE="reading the grants -- nothing was changed"
+  grants_to "$WORK/all"
+  daemons_to "$WORK/daemons"
+  : > "$WORK/status"
+  while IFS= read -r _l; do
+    _nm=${_l##*/my-fda.}
+    _t=$(marker_of "$_l"); _tn=""
+    if [ -z "$_t" ]; then _t="?"; _tn="no target marker: not built by $US"
+    elif [ ! -e "$_t" ]; then _tn="target GONE -> recreate it, or $US destroy $_nm"; fi
+    _g=$(awk -F '\t' -v c="$_l" '$2 == "1" && $3 == c { print $1 " " $4 }' "$WORK/all")
+    if [ -z "$_g" ]; then _g="none"; _gn="no grant -> $US add $_l"; else _gn=""; fi
+    _u=$(awk -F '\t' -v l="$_l" '$1 == l { printf "%s%s", sep, $2; sep = "," }' "$WORK/daemons")
+    [ -n "$_u" ] || _u="unused"
+    _note="${_tn:-${_gn:--}}"
+    [ -n "$_tn" ] && [ -n "$_gn" ] && _note="$_tn; $_gn"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$_nm" "$_t" "$_g" "$_u" "$_note" "$_l" >> "$WORK/status"
+  done < "$WORK/launchers"
+  awk -F '\t' -v vrb="$VRB" '
+    { for (k = 1; k <= 6; k++) { f[NR, k] = $k; if (length($k) > w[k]) w[k] = length($k) } }
+    END {
+      for (i = 1; i <= NR; i++) {
+        l = sprintf("%-" w[1] "s  %-" w[2] "s  grant %-" w[3] "s  used by %-" w[4] "s  %s",
+                    f[i, 1], f[i, 2], f[i, 3], f[i, 4], f[i, 5])
+        if (vrb == "1") l = l "  (" f[i, 6] ")"
+        print l
+      }
+    }' "$WORK/status"
+}
+
+cmd_test() { # <NAME>
+  [ $# -eq 1 ] || err 00059 "usage: $US test <NAME>"
+  _l=$(launcher_of "$1") || exit 1
+  daemons_to "$WORK/daemons"
+  awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
+  _k=$(wc -l < "$WORK/users" | tr -d ' ')
+  [ "$_k" != "0" ] || err 00060 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00061 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
+  PHASE="starting system/$_lb -- if it started, it runs on under launchd"
+  if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
+    err 00062 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+  fi
+  _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
+    || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
+    || _log="none set in $_pl"
+  msg "started system/$_lb through launchd -- it runs under the grant of $_l, as it will unattended"
+  msg "    > its log: $_log"
+  msg "--> when it ends: launchctl print system/$_lb | grep 'last exit code'"
+}
+
+cmd_destroy() { # [go] <NAME>
+  _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
+  [ $# -eq 1 ] || err 00063 "usage: $US destroy [go] <NAME>"
+  _l=$(launcher_of "$1") || exit 1
+  PHASE="reading the grants -- nothing was changed"
+  grants_to "$WORK/all"
+  daemons_to "$WORK/daemons"
+  awk -F '\t' -v c="$_l" '$2 == "1" && $3 == c' "$WORK/all" > "$WORK/sel"
+  _u=$(awk -F '\t' -v l="$_l" '$1 == l { printf "%s%s", sep, $2; sep = "," }' "$WORK/daemons")
+  say "launcher  $_l -> $(marker_of "$_l")"
+  if [ -s "$WORK/sel" ]; then say "grant     $(render < "$WORK/sel")"; else say "grant     none"; fi
+  say "used by   ${_u:-unused}"
+  [ -n "$_u" ] && say "    > that job fails once the launcher is gone -- point its Program elsewhere first"
+  if [ "$_go" = "0" ]; then
+    say "--> nothing changed -- '$US destroy go $1' deletes the launcher and its grant"
+    return 0
+  fi
+  DELETED=0
+  [ -s "$WORK/sel" ] && delete_grants "$WORK/sel"
+  PHASE="deleting the launcher -- its grant is already gone"
+  run rm -f "$_l" || err 00064 "cannot delete '$_l'"
+  if [ -s "$WORK/sel" ]; then
+    msg "destroyed $_l [grant rows deleted $DELETED] -- TCC.db backup: $BACKUP_FILE"
+  else
+    msg "destroyed $_l [it had no grant]"
+  fi
 }
 
 ############################################################## tests
@@ -236,18 +790,47 @@ T_OK=0; T_BAD=0; T_NAME=""
 t_fail() { echo "  FAIL  $T_NAME -- $1"; T_BAD=$((T_BAD + 1)); }
 t_pass() { T_OK=$((T_OK + 1)); }
 
-# A world of its own: a fake cellar and files that exist or not.
+# A world of its own: a fake TCC.db, a fake cellar, stub commands, and
+# files that exist or not. Root is pretended (is_root), never used.
 t_world() {
-  T_DIR=$(mktemp -d /tmp/my-fda-test.XXXXXX) || exit 1
-  mkdir -p "$T_DIR/Cellar/rsync/3.5.1/bin" "$T_DIR/bin"
+  T_DIR=$(mktemp -d "${TMPDIR:-/tmp}/my-fda-test.XXXXXX") || exit 1
+  T_DIR=$(cd "$T_DIR" && pwd -P)
+  mkdir -p "$T_DIR/Cellar/rsync/3.5.1/bin" "$T_DIR/bin" "$T_DIR/work" "$T_DIR/helpers" "$T_DIR/daemons" "$T_DIR/stub"
   : > "$T_DIR/Cellar/rsync/3.5.1/bin/rsync"
   : > "$T_DIR/bin/tool"
   : > "$T_DIR/bin/my tool"
+  WORK="$T_DIR/work"
+  TCC_DB="$T_DIR/TCC.db"
+  BACKUP_DIR="$T_DIR/backup"
+  HELPER_DIR="$T_DIR/helpers"
+  LAUNCHD_DIR="$T_DIR/daemons"
+  FDA_PANE_URL="x-test-pane"
   BREW_CELLARS="$T_DIR/Cellar"
   SHELLS="/bin/sh"
+  c_sqlite3=/usr/bin/sqlite3; c_md5=/sbin/md5; c_plutil=/usr/bin/plutil
+  c_cc=/usr/bin/cc; c_xcode_select=/usr/bin/xcode-select
+  c_killall=/usr/bin/true
+  # Spotlight knows Finder and one app; open and launchctl log what they get.
+  # shellcheck disable=SC2016  # the stubs expand $1 when THEY run
+  printf '%s\n' '#!/bin/sh' \
+    'case "$1" in *com.apple.finder*) echo /System/Library/CoreServices/Finder.app ;;' \
+    '  *com.known.app*) echo /Applications/Known.app ;; esac' > "$T_DIR/stub/mdfind"
+  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/open.log'" > "$T_DIR/stub/open"
+  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/launchctl.log'" > "$T_DIR/stub/launchctl"
+  chmod 755 "$T_DIR/stub/"*
+  c_mdfind="$T_DIR/stub/mdfind"; c_open="$T_DIR/stub/open"; c_launchctl="$T_DIR/stub/launchctl"
+  "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
+  # shellcheck disable=SC2329  # called through need_root
+  is_root() { true; }
+  VRB=0; QUIET=0; BACKUP_STAMP=""
 }
+t_grant() { # <type> <client> [auth] [service] -- quotes on its own, never through sql_q, which is under test
+  "$c_sqlite3" "$TCC_DB" "insert into access (service, client, client_type, auth_value, last_modified) values ('${4:-$SERVICE}', '$(printf '%s' "$2" | sed "s/'/''/g")', $1, ${3:-2}, 1790000000);"
+}
+t_count() { "$c_sqlite3" "$TCC_DB" "select count(*) from access where service='$SERVICE';"; }
+t_id() { grant_id "$1" "$2"; }
 t_row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "2026-09-29 12:00:00"; }
-t_note_of() { classify | awk -F '\t' '{ print $3 }'; }
+t_note_of() { classify | awk -F '\t' '{ print $5 }'; }
 
 t_gone_path_is_gone() {
   _n=$(t_row 1 "$T_DIR/nope/rsync" 2 | t_note_of)
@@ -257,12 +840,25 @@ t_existing_cellar_path_still_breaks() {
   _n=$(t_row 1 "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" 2 | t_note_of)
   case "$_n" in Homebrew*) t_pass ;; *) t_fail "got '$_n'" ;; esac
 }
-t_app_id_is_never_gone() {
-  _n=$(t_row 0 "com.plexapp.plexmediaserver" 2 | t_note_of)
-  if [ "$_n" = "app" ]; then t_pass; else t_fail "got '$_n'"; fi
+t_found_app_is_app_with_its_path() {
+  _o=$(t_row 0 com.known.app 2 | classify | awk -F '\t' '{ print $5 "|" $7 }')
+  if [ "$_o" = "app|/Applications/Known.app" ]; then t_pass; else t_fail "got '$_o'"; fi
+}
+t_missing_app_is_gone() {
+  _n=$(t_row 0 com.vanished.app 2 | t_note_of)
+  case "$_n" in GONE*) t_pass ;; *) t_fail "got '$_n'" ;; esac
+}
+t_missing_apple_app_is_never_gone() {
+  _n=$(t_row 0 com.apple.sshd-keygen-wrapper 2 | t_note_of)
+  case "$_n" in GONE*) t_fail "got '$_n'" ;; *) t_pass ;; esac
+}
+t_spotlight_off_calls_no_app_gone() {
+  printf '#!/bin/sh\n' > "$T_DIR/stub/mdfind"
+  _n=$(t_row 0 com.vanished.app 2 | t_note_of)
+  case "$_n" in *"not checked"*) t_pass ;; *) t_fail "got '$_n'" ;; esac
 }
 t_denied_shows_the_raw_value() {
-  _s=$(t_row 1 "$T_DIR/bin/tool" 0 | classify | awk -F '\t' '{ print $2 }')
+  _s=$(t_row 1 "$T_DIR/bin/tool" 0 | classify | awk -F '\t' '{ print $4 }')
   if [ "$_s" = "denied[0]" ]; then t_pass; else t_fail "got '$_s'"; fi
 }
 t_shell_is_flagged() {
@@ -271,17 +867,176 @@ t_shell_is_flagged() {
 }
 t_space_in_path_stays_one_client() {
   _o=$(t_row 1 "$T_DIR/bin/my tool" 2 | classify | render)
-  case "$_o" in "$T_DIR/bin/my tool "*"allowed[2]"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+  case "$_o" in [0-9a-f]*"$TAB$T_DIR/bin/my tool "*"allowed[2]"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
 }
 t_summary_adds_up() {
   _o=$({ t_row 1 "$T_DIR/nope" 2; t_row 1 "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" 2
-         t_row 1 /bin/sh 2; t_row 0 com.x 2; t_row 1 "$T_DIR/bin/tool" 2; } | classify | summary)
-  if [ "$_o" = "5 grant(s): 1 GONE, 1 on a Homebrew version path, 1 shell(s), 1 app(s), 1 other [rows 5]" ]; then t_pass; else t_fail "got '$_o'"; fi
+         t_row 1 /bin/sh 2; t_row 0 com.known.app 2; t_row 1 "$T_DIR/bin/tool" 2; } | classify | summary)
+  if [ "$_o" = "5 grant(s): 1 gone, 1 on a Homebrew version path, 1 shell(s), 1 app(s), 1 other [rows 5]" ]; then t_pass; else t_fail "got '$_o'"; fi
+}
+t_id_is_first_stable_and_cut_returns_it() {
+  t_grant 1 "$T_DIR/bin/tool"; t_grant 0 com.known.app
+  _a=$(QUIET=1 cmd_list | cut -f 1 | sort); _b=$(QUIET=1 cmd_list | cut -f 1 | sort)
+  _w=$(printf '%s\n' "$(t_id 1 "$T_DIR/bin/tool")" "$(t_id 0 com.known.app)" | sort)
+  if [ "$_a" = "$_w" ] && [ "$_b" = "$_w" ]; then t_pass; else t_fail "got '$_a' / '$_b', want '$_w'"; fi
+}
+t_grep_GONE_picks_only_grant_rows() {
+  t_grant 1 "$T_DIR/nope"; t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_list | grep GONE)
+  if [ "$(printf '%s\n' "$_o" | wc -l | tr -d ' ')" = "1" ] && [ "$(printf '%s' "$_o" | cut -f 1)" = "$(t_id 1 "$T_DIR/nope")" ]; then t_pass; else t_fail "got '$_o'"; fi
+}
+t_other_services_are_not_listed() {
+  t_grant 1 "$T_DIR/bin/tool" 2 kTCCServiceCamera
+  _o=$(QUIET=1 cmd_list)
+  if [ -z "$_o" ]; then t_pass; else t_fail "got '$_o'"; fi
+}
+t_remove_without_go_changes_nothing() {
+  t_grant 1 "$T_DIR/nope"; t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_remove "$(t_id 1 "$T_DIR/nope")" 2>&1)
+  if [ "$(t_count)" = "2" ] && [ ! -d "$BACKUP_DIR" ] && case "$_o" in *"nothing changed"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "count $(t_count), '$_o'"; fi
+}
+t_remove_go_takes_only_the_named_and_backs_up() {
+  t_grant 1 "$T_DIR/nope"; t_grant 1 "$T_DIR/bin/tool"; t_grant 0 com.known.app
+  t_grant 1 "$T_DIR/nope" 2 kTCCServiceCamera
+  _o=$(cmd_remove go "$(t_id 1 "$T_DIR/nope")" 2>&1)
+  _left=$("$c_sqlite3" "$TCC_DB" "select client from access where service='$SERVICE' order by client;" | tr '\n' ' ')
+  _cam=$("$c_sqlite3" "$TCC_DB" "select count(*) from access where service='kTCCServiceCamera';")
+  _bk=$(find "$BACKUP_DIR" -name 'TCC.db.*' 2>/dev/null | head -n 1)
+  _bn=$("$c_sqlite3" "$_bk" "select count(*) from access where service='$SERVICE';" 2>/dev/null)
+  if [ "$_left" = "$T_DIR/bin/tool com.known.app " ] && [ "$_cam" = "1" ] && [ "$_bn" = "3" ] \
+     && case "$_o" in *"removed 1 grant(s) [rows deleted 1, remaining 0]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "left '$_left' cam $_cam backup $_bn, '$_o'"; fi
+}
+t_remove_reads_ids_from_a_list_pipe() {
+  t_grant 1 "$T_DIR/nope"; t_grant 1 "$T_DIR/gone2"; t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_list | grep GONE | cut -f 1 | cmd_remove go 2>&1)
+  _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
+  if [ "$_left" = "$T_DIR/bin/tool" ]; then t_pass; else t_fail "left '$_left', '$_o'"; fi
+}
+t_remove_empty_pipe_is_nothing_to_do() {
+  t_grant 1 "$T_DIR/bin/tool"
+  _o=$(printf '' | cmd_remove go 2>&1); _rc=$?
+  if [ "$_rc" = "0" ] && [ "$(t_count)" = "1" ]; then t_pass; else t_fail "rc $_rc, '$_o'"; fi
+}
+t_remove_unknown_id_changes_nothing() {
+  t_grant 1 "$T_DIR/nope"
+  _o=$(cmd_remove go "$(t_id 1 "$T_DIR/nope")" abcdef 2>&1); _rc=$?
+  if [ "$_rc" != "0" ] && [ "$(t_count)" = "1" ] && [ ! -d "$BACKUP_DIR" ]; then t_pass; else t_fail "rc $_rc count $(t_count), '$_o'"; fi
+}
+t_remove_quote_in_client_deletes_that_one() {
+  t_grant 1 "$T_DIR/it's gone"; t_grant 1 "$T_DIR/it"
+  [ "$(t_count)" = "2" ] || { t_fail "setup: $(t_count) grant(s), want 2"; return; }
+  _o=$(cmd_remove go "$(t_id 1 "$T_DIR/it's gone")" 2>&1)
+  _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
+  if [ "$_left" = "$T_DIR/it" ]; then t_pass; else t_fail "left '$_left', '$_o'"; fi
+}
+t_reset_go_takes_all_and_saves_the_list() {
+  t_grant 1 "$T_DIR/bin/tool"; t_grant 0 com.known.app; t_grant 1 "$T_DIR/nope"
+  t_grant 1 "$T_DIR/bin/tool" 2 kTCCServiceCamera
+  _o=$(cmd_reset go 2>&1)
+  _l=$(find "$BACKUP_DIR" -name 'list.*.txt' 2>/dev/null)
+  if [ "$(t_count)" = "0" ] && [ "$("$c_sqlite3" "$TCC_DB" "select count(*) from access;")" = "1" ] \
+     && [ "$(wc -l < "$_l" | tr -d ' ')" = "3" ] \
+     && case "$_o" in *"add $T_DIR/bin/tool"*) true ;; *) false ;; esac \
+     && case "$_o" in *"add $T_DIR/nope"*) false ;; *) true ;; esac
+  then t_pass; else t_fail "count $(t_count), list '$_l', '$_o'"; fi
+}
+t_reset_without_go_changes_nothing() {
+  t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_reset 2>&1)
+  if [ "$(t_count)" = "1" ] && [ ! -d "$BACKUP_DIR" ]; then t_pass; else t_fail "'$_o'"; fi
+}
+t_add_opens_the_pane_and_shows_the_file() {
+  _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
+  _log=$(tr '\n' '|' < "$T_DIR/stub/open.log" 2>/dev/null)
+  if [ "$_log" = "x-test-pane|-R $T_DIR/bin/tool|" ]; then t_pass; else t_fail "open got '$_log', '$_o'"; fi
+}
+t_add_already_granted_opens_nothing() {
+  t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
+  if [ ! -e "$T_DIR/stub/open.log" ] && case "$_o" in *"already granted"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "'$_o'"; fi
+}
+t_create_refuses_what_it_must() {
+  printf '#!/bin/sh\n' > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
+  chmod 755 "$T_DIR/Cellar/rsync/3.5.1/bin/rsync"
+  _bad=""
+  ( cmd_create "a b" "$T_DIR/bin/job" ) > /dev/null 2>&1 && _bad="$_bad name"
+  ( cmd_create job bin/job ) > /dev/null 2>&1 && _bad="$_bad relative"
+  ( cmd_create job "$T_DIR/bin/tool" ) > /dev/null 2>&1 && _bad="$_bad not-executable"
+  ( cmd_create rs "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" ) > /dev/null 2>&1 && _bad="$_bad cellar"
+  ( cmd_create sh /bin/sh ) > /dev/null 2>&1 && _bad="$_bad shell"
+  : > "$HELPER_DIR/my-fda.job"
+  ( cmd_create job "$T_DIR/bin/job" ) > /dev/null 2>&1 && _bad="$_bad existing"
+  if [ -z "$_bad" ] && [ ! -s "$HELPER_DIR/my-fda.job" ]; then t_pass; else t_fail "accepted:$_bad"; fi
+}
+t_launcher_passes_args_status_and_carries_its_target() {
+  { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
+  printf '%s\n' '#!/bin/sh' "printf '%s|' \"\$0\" \"\$@\" > '$T_DIR/ran'" 'exit 3' > "$T_DIR/bin/job"
+  chmod 755 "$T_DIR/bin/job"
+  _o=$(cmd_create job "$T_DIR/bin/job" 2>&1)
+  "$HELPER_DIR/my-fda.job" "a b" c; _rc=$?
+  _ran=$(cat "$T_DIR/ran" 2>/dev/null)
+  _m=$(marker_of "$HELPER_DIR/my-fda.job")
+  if [ "$_rc" = "3" ] && [ "$_ran" = "$T_DIR/bin/job|a b|c|" ] && [ "$_m" = "$T_DIR/bin/job" ]; then t_pass
+  else t_fail "rc $_rc ran '$_ran' marker '$_m', '$_o'"; fi
+}
+t_daemon_plist() { # <label> <program>
+  "$c_plutil" -create xml1 "$LAUNCHD_DIR/$1.plist"
+  "$c_plutil" -insert Label -string "$1" "$LAUNCHD_DIR/$1.plist"
+  "$c_plutil" -insert ProgramArguments -array "$LAUNCHD_DIR/$1.plist"
+  "$c_plutil" -insert ProgramArguments.0 -string "$2" "$LAUNCHD_DIR/$1.plist"
+  "$c_plutil" -insert StandardErrorPath -string "/var/log/$1.log" "$LAUNCHD_DIR/$1.plist"
+}
+t_fake_launcher() { # <name> <target>
+  printf 'junk\000MY-FDA-TARGET=%s\000junk\n' "$2" > "$HELPER_DIR/my-fda.$1"
+}
+t_status_shows_target_grant_and_daemon() {
+  t_fake_launcher job "$T_DIR/bin/tool"; t_fake_launcher old "$T_DIR/nope"
+  t_grant 1 "$HELPER_DIR/my-fda.job"; t_daemon_plist org.test.job "$HELPER_DIR/my-fda.job"
+  _o=$(cmd_status 2>&1)
+  _j=$(printf '%s\n' "$_o" | grep '^job ')
+  _d=$(printf '%s\n' "$_o" | grep '^old ')
+  case "$_j" in *"$T_DIR/bin/tool"*"allowed[2]"*"used by org.test.job"*) ;; *) t_fail "job '$_j'"; return ;; esac
+  case "$_d" in *"grant none"*"unused"*"target GONE"*"no grant"*) t_pass ;; *) t_fail "old '$_d'" ;; esac
+}
+t_test_kickstarts_the_one_daemon() {
+  t_fake_launcher job "$T_DIR/bin/tool"; t_daemon_plist org.test.job "$HELPER_DIR/my-fda.job"
+  _o=$(cmd_test job 2>&1)
+  _log=$(cat "$T_DIR/stub/launchctl.log" 2>/dev/null)
+  if [ "$_log" = "kickstart system/org.test.job" ] && case "$_o" in *"/var/log/org.test.job.log"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "launchctl '$_log', '$_o'"; fi
+}
+t_test_refuses_unused_and_ambiguous() {
+  t_fake_launcher job "$T_DIR/bin/tool"
+  ( cmd_test job ) > /dev/null 2>&1 && { t_fail "started an unused launcher"; return; }
+  t_daemon_plist org.a "$HELPER_DIR/my-fda.job"; t_daemon_plist org.b "$HELPER_DIR/my-fda.job"
+  ( cmd_test job ) > /dev/null 2>&1 && { t_fail "started one of two"; return; }
+  if [ ! -e "$T_DIR/stub/launchctl.log" ]; then t_pass; else t_fail "launchctl ran"; fi
+}
+t_destroy_shows_then_go_deletes_launcher_and_grant() {
+  t_fake_launcher job "$T_DIR/bin/tool"; t_grant 1 "$HELPER_DIR/my-fda.job"; t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_destroy job 2>&1)
+  [ -e "$HELPER_DIR/my-fda.job" ] && [ "$(t_count)" = "2" ] || { t_fail "destroy without go changed something: '$_o'"; return; }
+  _o=$(cmd_destroy go job 2>&1)
+  _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
+  if [ ! -e "$HELPER_DIR/my-fda.job" ] && [ "$_left" = "$T_DIR/bin/tool" ]; then t_pass; else t_fail "left '$_left', '$_o'"; fi
 }
 t_list_refuses_without_root() {
   [ "$(id -u)" = "0" ] && { t_pass; return; }
   _o=$(MY_FDA_CONFIG=/dev/null "$(self_path)" list 2>&1); _rc=$?
   if [ "$_rc" != "0" ] && case "$_o" in *"needs root"*) true ;; *) false ;; esac; then t_pass; else t_fail "rc $_rc, '$_o'"; fi
+}
+t_config_lacking_keys_names_them() {
+  printf 'TCC_DB=/x\n' > "$T_DIR/old.conf"
+  _o=$( (unset c_launchctl; CONFIG_ARG="$T_DIR/old.conf"; MY_FDA_CONFIG=""; load_config) 2>&1)
+  case "$_o" in *"lacks:"*"c_launchctl"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+}
+t_default_config_has_every_key() {
+  default_config > "$T_DIR/def.conf"
+  _o=$( (for _k in $CONFIG_KEYS; do unset "$_k"; done; CONFIG_ARG="$T_DIR/def.conf"; MY_FDA_CONFIG=""; load_config) 2>&1); _rc=$?
+  if [ "$_rc" = "0" ]; then t_pass; else t_fail "rc $_rc, '$_o'"; fi
 }
 t_config_offer_names_only_searched_paths() {
   _bad=""
@@ -300,17 +1055,44 @@ t_create_config_never_overwrites() {
   _o=$("$(self_path)" --create-config "$T_DIR/exists.conf" 2>&1); _rc=$?
   if [ "$_rc" != "0" ] && [ ! -s "$T_DIR/exists.conf" ]; then t_pass; else t_fail "rc $_rc, '$_o'"; fi
 }
-t_dashed_verb_names_the_verb() {
-  _o=$("$(self_path)" --list 2>&1)
-  case "$_o" in *"you mean"*"my-fda list"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+t_dashed_verb_and_rm_name_the_verb() {
+  _a=$("$(self_path)" --list 2>&1); _b=$("$(self_path)" rm abcdef 2>&1)
+  case "$_a|$_b" in *"you mean"*"my-fda list"*"|"*"you mean"*"my-fda remove"*) t_pass ;; *) t_fail "got '$_a' / '$_b'" ;; esac
+}
+t_help_names_every_verb() {
+  _h=$(usage); _bad=""
+  for _v in list add remove reset create destroy status test; do
+    case "$_h" in *"
+  $_v "*) ;; *) _bad="$_bad $_v" ;; esac
+  done
+  if [ -z "$_bad" ]; then t_pass; else t_fail "--help lacks:$_bad"; fi
+}
+t_err_codes_unique_in_order_without_gaps() {
+  _got=$(grep -o -E '(err|ERROR) 0[0-9]{4}' "$(self_path)" | awk '{ printf "%d ", $2 + 0 }')
+  _want=$(awk -v n="$(printf '%s\n' "$_got" | wc -w)" 'BEGIN { for (i = 1; i <= n; i++) printf "%d ", i }')
+  if [ "$_got" = "$_want" ]; then t_pass; else t_fail "codes '$_got'"; fi
 }
 
 run_tests() { # [FILTER]
   for T_NAME in t_gone_path_is_gone t_existing_cellar_path_still_breaks \
-                t_app_id_is_never_gone t_denied_shows_the_raw_value t_shell_is_flagged \
-                t_space_in_path_stays_one_client t_summary_adds_up t_list_refuses_without_root \
-                t_config_offer_names_only_searched_paths t_create_config_never_overwrites \
-                t_dashed_verb_names_the_verb; do
+                t_found_app_is_app_with_its_path t_missing_app_is_gone \
+                t_missing_apple_app_is_never_gone t_spotlight_off_calls_no_app_gone \
+                t_denied_shows_the_raw_value t_shell_is_flagged \
+                t_space_in_path_stays_one_client t_summary_adds_up \
+                t_id_is_first_stable_and_cut_returns_it t_grep_GONE_picks_only_grant_rows \
+                t_other_services_are_not_listed \
+                t_remove_without_go_changes_nothing t_remove_go_takes_only_the_named_and_backs_up \
+                t_remove_reads_ids_from_a_list_pipe t_remove_empty_pipe_is_nothing_to_do \
+                t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
+                t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
+                t_add_opens_the_pane_and_shows_the_file t_add_already_granted_opens_nothing \
+                t_create_refuses_what_it_must t_launcher_passes_args_status_and_carries_its_target \
+                t_status_shows_target_grant_and_daemon t_test_kickstarts_the_one_daemon \
+                t_test_refuses_unused_and_ambiguous t_destroy_shows_then_go_deletes_launcher_and_grant \
+                t_list_refuses_without_root t_config_lacking_keys_names_them \
+                t_default_config_has_every_key t_config_offer_names_only_searched_paths \
+                t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
+                t_help_names_every_verb t_err_codes_unique_in_order_without_gaps; do
     case "$T_NAME" in *"$1"*) ;; *) continue ;; esac
     t_world
     "$T_NAME"
@@ -322,30 +1104,50 @@ run_tests() { # [FILTER]
 
 ############################################################## main
 
-CMD=""
-while [ $# -gt 0 ]; do
-  case "$1" in
+ARGS_TEXT="$*"
+_n=$#
+while [ "$_n" -gt 0 ]; do
+  _a=$1; shift; _n=$((_n - 1))
+  case "$_a" in
     -h|--help)        usage; exit 0 ;;
     --version)        version; exit 0 ;;
+    --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ $# -ge 2 ] || err 00010 "--config needs a file"; CONFIG_ARG="$2"; shift ;;
-    --config=*)       CONFIG_ARG="${1#--config=}" ;;
-    --create-config)  if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then create_config "$2"; else create_config; fi; exit 0 ;;
-    --create-config=*) create_config "${1#--create-config=}"; exit 0 ;;
-    --run-tests)      run_tests "${2:-}"; exit $? ;;
-    --list|--add|--remove|--status|--test)
-                      err 00011 "no such option; you mean \`$US ${1#--}\`" ;;
-    -*)               err 00012 "unknown option '$1' (--help)" ;;
-    *)                [ -z "$CMD" ] || err 00013 "one command at a time: '$CMD' and '$1'"; CMD="$1" ;;
+    --config)         [ "$_n" -ge 1 ] || err 00065 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config=*)       CONFIG_ARG="${_a#--config=}" ;;
+    --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
+    --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
+    --run-tests)      run_tests "${1:-}"; exit $? ;;
+    --list|--add|--remove|--reset|--create|--destroy|--status|--test)
+                      err 00066 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00067 "unknown option '$_a' (--help)" ;;
+    *)                set -- "$@" "$_a" ;;
   esac
-  shift
 done
 [ "$VRB" = "1" ] && QUIET=0
 
+CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
-  list)                      load_config; cmd_list ;;
-  add|remove|status|test)    err 00014 "'$CMD' is designed, not built yet (DESIGN.local.md)" ;;
-  "")                        usage 1>&2; exit 1 ;;
-  *)                         err 00015 "unknown command '$CMD' (--help)" ;;
+  list|add|remove|reset|create|destroy|status|test) ;;
+  rm)  err 00068 "no such command; you mean \`$US remove\`" ;;
+  "")  usage 1>&2; exit 1 ;;
+  *)   err 00069 "unknown command '$CMD' (--help)" ;;
+esac
+
+need_root
+load_config
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00070 "mktemp failed"
+trap 'rm -rf "$WORK"' EXIT
+trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
+
+case "$CMD" in
+  list)    cmd_list "$@" ;;
+  add)     cmd_add "$@" ;;
+  remove)  cmd_remove "$@" ;;
+  reset)   cmd_reset "$@" ;;
+  create)  cmd_create "$@" ;;
+  destroy) cmd_destroy "$@" ;;
+  status)  cmd_status "$@" ;;
+  test)    cmd_test "$@" ;;
 esac

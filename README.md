@@ -13,35 +13,58 @@ granted.
 ## How
 
 A *launcher* holds the grant instead: a tiny compiled program, built once
-and never rebuilt, that runs one fixed target (a script, or a Homebrew
-binary by its stable path such as `/opt/homebrew/bin/rsync`). The
+and never rebuilt, that runs one fixed target -- a script, or a Homebrew
+binary by its stable path such as `/opt/homebrew/bin/rsync`. The
 LaunchDaemon starts the launcher; macOS counts the program launchd started
 as responsible for everything it runs, so the target gets the launcher's
-grant. A launcher is `/Library/PrivilegedHelperTools/my-fda.<NAME>`,
-root:wheel 700, and reads as `my-fda.<NAME>` in the Full Disk Access list.
+grant.
+
+- A launcher is `/Library/PrivilegedHelperTools/my-fda.<NAME>`, root:wheel
+  700, and reads as `my-fda.<NAME>` in the Full Disk Access list.
+- `create` builds it on the machine with its own `cc` (Command Line Tools);
+  the C source lives inside `my-fda`, never a binary in git.
+- It spawns the target and waits, so the process holding the grant lives for
+  the whole run; it passes on all arguments and SIGTERM/SIGINT/SIGHUP, and
+  exits with the target's status.
+- The target is compiled in (`MY-FDA-TARGET=<path>`), never taken from the
+  command line; `status` reads it back out of the binary.
+- `create` never rebuilds an existing launcher: a rebuild loses its grant.
 
 ## Commands
 
     my-fda list                       every grant: an ID, the client, allowed/denied, what to do
-    my-fda add <PATH>                 "+": guides the grant (macOS grants only on a click)
+    my-fda add <PATH>                 "+": opens the pane, shows PATH in Finder to drag in, checks it
     my-fda remove <ID>...             "-": shows what it would take away
-    my-fda remove go <ID>...          ...and takes it away (TCC.db backed up first)
-    my-fda reset [go]                 all grants at once, with a saved list to give them back
+    my-fda remove go <ID>...          ...and takes it away
+    my-fda reset [go]                 all grants at once, and what to give back
     my-fda create <NAME> <TARGET>     build and install a launcher
     my-fda destroy [go] <NAME>        delete a launcher and its grant
     my-fda status [<NAME>]            each launcher, its target, its grant, the daemon using it
     my-fda test <NAME>                start that daemon through launchd
 
-The pipe `list` is made for:
+A destructive command shows first and acts only with `go`. The pipe `list`
+is made for:
 
     my-fda list | grep GONE | cut -f 1 | my-fda remove        # shows
     my-fda list | grep GONE | cut -f 1 | my-fda remove go     # acts
 
-Today (0.1) `list` is built; the rest is designed. `my-fda --help` is the
-reference for what the installed version does.
+- **IDs** are 6 hex characters of the client, the same on every run, followed
+  by a TAB -- `cut -f 1` returns them.
+- **Changes** go straight to TCC.db with sqlite3 (`tccutil` handles app ids
+  only): a backup first (`sqlite3 .backup` into `BACKUP_DIR`, never `cp` --
+  tccd holds the file open), then one transaction, then a count of what is
+  left, then tccd is restarted. `reset` also saves the list beside the
+  backup, so the grants to give back are known.
+- **`add` only guides**: macOS grants on a click (or a device-management
+  profile), and writing grants is what malware does.
+- **App ids** are checked with Spotlight: one it cannot find is `GONE`,
+  except Apple's own (Spotlight does not find them all) -- and none at all
+  when Spotlight finds no apps.
+- **`test`** is the only run that proves a grant: a run from a Terminal uses
+  the Terminal's.
 
 All commands need root, from a Terminal that has Full Disk Access itself:
-the permission database is protected.
+the permission database is protected. `my-fda --help` is the reference.
 
 ## Config
 
@@ -53,3 +76,6 @@ default. Search order: `$MY_FDA_CONFIG`, `--config <FILE>`,
 ## Tests
 
     my-fda --run-tests [<FILTER>]
+
+They run against a TCC.db of their own, with stubs for launchctl, open and
+Spotlight -- never against the real one, and without root.
