@@ -1,0 +1,351 @@
+#!/bin/dash
+# my-fda -- Full Disk Access for root jobs, kept stable across upgrades.
+#
+# macOS ties a Full Disk Access grant to a binary's path and contents. A
+# Homebrew binary changes both on every upgrade, so its grant silently stops
+# applying. my-fda keeps the grants short and stable; today it LISTS them and
+# says which ones are stale or will break (add/remove/status/test: see
+# DESIGN.local.md).
+
+SCRIPT_VERSION="0.1"
+SCRIPT_COMMIT=""
+
+US="${0##*/}"
+QUIET=0; VRB=0
+CONFIG_ARG=""
+
+err() { # <code> [text]
+  _c="$1"; shift
+  printf 'ERROR %s [1]: %s\n' "$_c" "$*" 1>&2
+  exit 1
+}
+
+msg() { [ "$QUIET" = "1" ] || printf '%s\n' "$*"; }
+
+# The real file behind $0 -- /LINKS/sbin/my-fda is a link or a copy.
+self_path() {
+  _p="$0"
+  while [ -L "$_p" ]; do
+    _l=$(readlink "$_p")
+    case "$_l" in /*) _p="$_l" ;; *) _p="${_p%/*}/$_l" ;; esac
+  done
+  printf '%s\n' "$_p"
+}
+
+version() {
+  _b=$(shasum -a 256 "$(self_path)" | awk '{ print substr($1, 1, 12) }')
+  if [ -n "$SCRIPT_COMMIT" ]; then
+    printf '%s %s (commit %s, build %s)\n' "$US" "$SCRIPT_VERSION" "$SCRIPT_COMMIT" "$_b"
+  else
+    printf '%s %s (build %s, unstamped)\n' "$US" "$SCRIPT_VERSION" "$_b"
+  fi
+}
+
+usage() {
+  cat <<_EOF
+usage: $US [-Q] [-V] [--config <FILE>] <COMMAND>
+
+Full Disk Access for root jobs, kept stable across Homebrew upgrades.
+
+COMMANDS
+  list          every Full Disk Access grant, one line each: the client (a
+                path or an app id), allowed[2] / denied[0] with the raw
+                value, and what to do with it:
+                  GONE -> remove        the path no longer exists
+                  Homebrew version path: breaks on upgrade -> my-fda
+                  a shell: every script it runs gets full disk access -> remove
+                Needs root, run from a Terminal that has Full Disk Access
+                itself: the permission database is protected.
+  add, remove, status, test
+                designed, not built yet (DESIGN.local.md)
+
+OPTIONS
+  -V, --verbose         adds the date of each grant
+  -Q, --quiet           no summary line; errors still go to stderr
+  --config <FILE>       use this config, bypassing the search
+  --create-config [<FILE>]
+                        print the default config, or write it to <FILE>
+                        (never over an existing one)
+  --run-tests [<FILTER>]
+                        run the built-in tests (name substring)
+  --version             version and build id
+  -h, --help            this help
+
+CONFIG (first found wins)
+  \$MY_FDA_CONFIG, --config <FILE>, /LINKS/default/my-fda.conf,
+  /LINKS/default/my-fda, ~/.my-fda.conf, /etc/my-fda.conf,
+  /usr/local/etc/my-fda.conf
+_EOF
+}
+
+default_config() {
+  cat <<'_EOF'
+# my-fda config -- plain shell, sourced at startup
+
+# The system-wide permission database (Full Disk Access lives here).
+TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+
+# The sqlite3 that reads it.
+c_sqlite3="/usr/bin/sqlite3"
+
+# Where Homebrew keeps its versioned binaries: a grant on a path under one
+# of these breaks on the next upgrade of that formula.
+BREW_CELLARS="/opt/homebrew/Cellar /usr/local/Cellar"
+
+# Shells: a grant on one gives full disk access to every script it runs.
+SHELLS="/bin/sh /bin/bash /bin/zsh /bin/dash /bin/ksh /bin/tcsh /bin/csh"
+_EOF
+}
+
+config_search_paths() {
+  printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
+    "$HOME/.my-fda.conf" /etc/my-fda.conf /usr/local/etc/my-fda.conf
+}
+
+# The offer names only paths the search reads, most common place first.
+config_offer_paths() {
+  for _o in /LINKS/global/etc/default/my-fda.conf /etc/my-fda.conf "$HOME/.my-fda.conf"; do
+    case "$_o" in
+      /LINKS/global/etc/default/my-fda.conf)
+        config_search_paths | grep -qx "${LINKS:-/LINKS}/default/my-fda.conf" && printf '%s\n' "$_o" ;;
+      *) config_search_paths | grep -qx "$_o" && printf '%s\n' "$_o" ;;
+    esac
+  done
+}
+
+load_config() {
+  _cf="${MY_FDA_CONFIG:-$CONFIG_ARG}"
+  if [ -z "$_cf" ]; then
+    while IFS= read -r _p; do
+      [ -f "$_p" ] && { _cf="$_p"; break; }
+    done <<_EOF
+$(config_search_paths)
+_EOF
+  fi
+  if [ -z "$_cf" ]; then
+    {
+      echo "!!! no config found -- write one, most common place first:"
+      config_offer_paths | while IFS= read -r _o; do echo "    > $US --create-config > $_o"; done
+      echo "    (/LINKS/global needs root, and a my-rollout run for the /LINKS/default link; --help: full search order)"
+    } 1>&2
+    exit 1
+  fi
+  [ -r "$_cf" ] || err 00001 "config '$_cf' is not readable"
+  # shellcheck disable=SC1090  # the config path is chosen at runtime
+  . "$_cf" || err 00002 "config '$_cf' failed to load"
+  CONFIG_FILE="$_cf"
+}
+
+create_config() { # [FILE]
+  if [ -z "$1" ]; then default_config; return 0; fi
+  [ -e "$1" ] && err 00003 "'$1' exists -- not overwritten"
+  default_config > "$1" || err 00004 "cannot write '$1'"
+  msg " >>> default config written to $1"
+}
+
+# One grant per line on stdin: type<TAB>client<TAB>auth<TAB>date.
+# Out: client<TAB>state<TAB>note<TAB>date -- the note says what to do.
+classify() {
+  _tab=$(printf '\t')
+  while IFS="$_tab" read -r _t _c _a _d; do
+    [ -n "$_c" ] || continue
+    case "$_a" in
+      2) _s="allowed[2]" ;;
+      0) _s="denied[0]" ;;
+      *) _s="other[$_a]" ;;
+    esac
+    _n="-"
+    if [ "$_t" = "1" ]; then
+      if [ ! -e "$_c" ]; then
+        _n="GONE -> remove"
+      else
+        for _sh in $SHELLS; do
+          [ "$_c" = "$_sh" ] && _n="a shell: every script it runs gets full disk access -> remove"
+        done
+        for _cel in $BREW_CELLARS; do
+          case "$_c" in "$_cel"/*) _n="Homebrew version path: breaks on upgrade -> my-fda" ;; esac
+        done
+      fi
+    elif [ "$_t" = "0" ]; then
+      _n="app"
+    else
+      _n="unknown client type [$_t]"
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$_c" "$_s" "$_n" "$_d"
+  done
+}
+
+# Classified lines on stdin -> aligned table; the client (the key) first.
+render() {
+  awk -F '\t' -v vrb="$VRB" '
+    { c[NR] = $1; s[NR] = $2; n[NR] = $3; d[NR] = $4; if (length($1) > w) w = length($1) }
+    END {
+      for (i = 1; i <= NR; i++) {
+        if (vrb == "1") printf "%-" w "s  %-11s  %-19s  %s\n", c[i], s[i], d[i], n[i]
+        else            printf "%-" w "s  %-11s  %s\n", c[i], s[i], n[i]
+      }
+    }'
+}
+
+# Classified lines on stdin -> one summary line; the parts must add up.
+summary() {
+  awk -F '\t' '
+    { rows++ }
+    $3 ~ /^GONE/     { gone++ }
+    $3 ~ /^Homebrew/ { brew++ }
+    $3 ~ /^a shell/  { shell++ }
+    $3 == "app"      { app++ }
+    END {
+      other = rows - gone - brew - shell - app
+      printf "%d grant(s): %d GONE, %d on a Homebrew version path, %d shell(s), %d app(s), %d other [rows %d]\n",
+        rows, gone, brew, shell, app, other, rows
+    }'
+}
+
+tcc_rows() {
+  # shellcheck disable=SC2154  # c_sqlite3 comes from the config
+  "$c_sqlite3" -separator "$(printf '\t')" "$TCC_DB" \
+    "select client_type, client, auth_value, datetime(last_modified,'unixepoch') from access where service='kTCCServiceSystemPolicyAllFiles' order by client;"
+}
+
+cmd_list() {
+  if [ "$(id -u)" != "0" ]; then
+    printf '%s\n' "needs root -- rerun under sudo:" "    sudo $0 list" 1>&2
+    exit 1
+  fi
+  [ -x "$c_sqlite3" ] || err 00005 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
+  _tmp=$(mktemp /tmp/my-fda.XXXXXX) || err 00006 "mktemp failed"
+  _rows=$(mktemp /tmp/my-fda.XXXXXX) || err 00007 "mktemp failed"
+  if ! tcc_rows > "$_rows" 2> "$_tmp"; then
+    _e=$(cat "$_tmp"); rm -f "$_tmp" "$_rows"
+    case "$_e" in
+      *"authorization denied"*|*"unable to open"*)
+        err 00008 "cannot read '$TCC_DB' ($_e) -- the Terminal running this needs Full Disk Access itself" ;;
+      *) err 00009 "sqlite3 failed on '$TCC_DB': $_e" ;;
+    esac
+  fi
+  classify < "$_rows" > "$_tmp"
+  render < "$_tmp"
+  [ "$QUIET" = "1" ] || summary < "$_tmp"
+  rm -f "$_tmp" "$_rows"
+}
+
+############################################################## tests
+
+T_OK=0; T_BAD=0; T_NAME=""
+t_fail() { echo "  FAIL  $T_NAME -- $1"; T_BAD=$((T_BAD + 1)); }
+t_pass() { T_OK=$((T_OK + 1)); }
+
+# A world of its own: a fake cellar and files that exist or not.
+t_world() {
+  T_DIR=$(mktemp -d /tmp/my-fda-test.XXXXXX) || exit 1
+  mkdir -p "$T_DIR/Cellar/rsync/3.5.1/bin" "$T_DIR/bin"
+  : > "$T_DIR/Cellar/rsync/3.5.1/bin/rsync"
+  : > "$T_DIR/bin/tool"
+  : > "$T_DIR/bin/my tool"
+  BREW_CELLARS="$T_DIR/Cellar"
+  SHELLS="/bin/sh"
+}
+t_row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "2026-09-29 12:00:00"; }
+t_note_of() { classify | awk -F '\t' '{ print $3 }'; }
+
+t_gone_path_is_gone() {
+  _n=$(t_row 1 "$T_DIR/nope/rsync" 2 | t_note_of)
+  case "$_n" in GONE*) t_pass ;; *) t_fail "got '$_n'" ;; esac
+}
+t_existing_cellar_path_still_breaks() {
+  _n=$(t_row 1 "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" 2 | t_note_of)
+  case "$_n" in Homebrew*) t_pass ;; *) t_fail "got '$_n'" ;; esac
+}
+t_app_id_is_never_gone() {
+  _n=$(t_row 0 "com.plexapp.plexmediaserver" 2 | t_note_of)
+  if [ "$_n" = "app" ]; then t_pass; else t_fail "got '$_n'"; fi
+}
+t_denied_shows_the_raw_value() {
+  _s=$(t_row 1 "$T_DIR/bin/tool" 0 | classify | awk -F '\t' '{ print $2 }')
+  if [ "$_s" = "denied[0]" ]; then t_pass; else t_fail "got '$_s'"; fi
+}
+t_shell_is_flagged() {
+  _n=$(t_row 1 /bin/sh 2 | t_note_of)
+  case "$_n" in "a shell"*) t_pass ;; *) t_fail "got '$_n'" ;; esac
+}
+t_space_in_path_stays_one_client() {
+  _o=$(t_row 1 "$T_DIR/bin/my tool" 2 | classify | render)
+  case "$_o" in "$T_DIR/bin/my tool "*"allowed[2]"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+}
+t_summary_adds_up() {
+  _o=$({ t_row 1 "$T_DIR/nope" 2; t_row 1 "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" 2
+         t_row 1 /bin/sh 2; t_row 0 com.x 2; t_row 1 "$T_DIR/bin/tool" 2; } | classify | summary)
+  if [ "$_o" = "5 grant(s): 1 GONE, 1 on a Homebrew version path, 1 shell(s), 1 app(s), 1 other [rows 5]" ]; then t_pass; else t_fail "got '$_o'"; fi
+}
+t_list_refuses_without_root() {
+  [ "$(id -u)" = "0" ] && { t_pass; return; }
+  _o=$(MY_FDA_CONFIG=/dev/null "$(self_path)" list 2>&1); _rc=$?
+  if [ "$_rc" != "0" ] && case "$_o" in *"needs root"*) true ;; *) false ;; esac; then t_pass; else t_fail "rc $_rc, '$_o'"; fi
+}
+t_config_offer_names_only_searched_paths() {
+  _bad=""
+  while IFS= read -r _o; do
+    case "$_o" in
+      /LINKS/global/etc/default/my-fda.conf) config_search_paths | grep -qx "${LINKS:-/LINKS}/default/my-fda.conf" || _bad="$_bad $_o" ;;
+      *) config_search_paths | grep -qx "$_o" || _bad="$_bad $_o" ;;
+    esac
+  done <<_EOF
+$(config_offer_paths)
+_EOF
+  if [ -z "$_bad" ]; then t_pass; else t_fail "offered but not searched:$_bad"; fi
+}
+t_create_config_never_overwrites() {
+  : > "$T_DIR/exists.conf"
+  _o=$("$(self_path)" --create-config "$T_DIR/exists.conf" 2>&1); _rc=$?
+  if [ "$_rc" != "0" ] && [ ! -s "$T_DIR/exists.conf" ]; then t_pass; else t_fail "rc $_rc, '$_o'"; fi
+}
+t_dashed_verb_names_the_verb() {
+  _o=$("$(self_path)" --list 2>&1)
+  case "$_o" in *"you mean"*"my-fda list"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+}
+
+run_tests() { # [FILTER]
+  for T_NAME in t_gone_path_is_gone t_existing_cellar_path_still_breaks \
+                t_app_id_is_never_gone t_denied_shows_the_raw_value t_shell_is_flagged \
+                t_space_in_path_stays_one_client t_summary_adds_up t_list_refuses_without_root \
+                t_config_offer_names_only_searched_paths t_create_config_never_overwrites \
+                t_dashed_verb_names_the_verb; do
+    case "$T_NAME" in *"$1"*) ;; *) continue ;; esac
+    t_world
+    "$T_NAME"
+    rm -rf "$T_DIR"
+  done
+  echo "tests: $T_OK passed, $T_BAD failed [$((T_OK + T_BAD))]"
+  [ "$T_BAD" = "0" ]
+}
+
+############################################################## main
+
+CMD=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help)        usage; exit 0 ;;
+    --version)        version; exit 0 ;;
+    -V|--verbose)     VRB=1 ;;
+    -Q|--quiet)       QUIET=1 ;;
+    --config)         [ $# -ge 2 ] || err 00010 "--config needs a file"; CONFIG_ARG="$2"; shift ;;
+    --config=*)       CONFIG_ARG="${1#--config=}" ;;
+    --create-config)  if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then create_config "$2"; else create_config; fi; exit 0 ;;
+    --create-config=*) create_config "${1#--create-config=}"; exit 0 ;;
+    --run-tests)      run_tests "${2:-}"; exit $? ;;
+    --list|--add|--remove|--status|--test)
+                      err 00011 "no such option; you mean \`$US ${1#--}\`" ;;
+    -*)               err 00012 "unknown option '$1' (--help)" ;;
+    *)                [ -z "$CMD" ] || err 00013 "one command at a time: '$CMD' and '$1'"; CMD="$1" ;;
+  esac
+  shift
+done
+[ "$VRB" = "1" ] && QUIET=0
+
+case "$CMD" in
+  list)                      load_config; cmd_list ;;
+  add|remove|status|test)    err 00014 "'$CMD' is designed, not built yet (DESIGN.local.md)" ;;
+  "")                        usage 1>&2; exit 1 ;;
+  *)                         err 00015 "unknown command '$CMD' (--help)" ;;
+esac
