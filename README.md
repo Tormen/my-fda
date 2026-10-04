@@ -80,8 +80,9 @@ the permission database is protected. `my-fda --help` is the reference.
 
 ## Config
 
-Plain shell, sourced at startup; `my-fda --create-config` prints the
-default. Search order: `$MY_FDA_CONFIG`, `--config <FILE>`,
+Plain shell, sourced at startup over the defaults: a key the file does not
+set keeps its default, so an older config needs no edit when a new key
+arrives. `my-fda --create-config` prints the defaults. Search order: `$MY_FDA_CONFIG`, `--config <FILE>`,
 `/LINKS/default/my-fda.conf`, `/LINKS/default/my-fda`, `~/.my-fda.conf`,
 `/etc/my-fda.conf`, `/usr/local/etc/my-fda.conf`.
 
