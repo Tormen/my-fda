@@ -67,9 +67,11 @@ any other selection goes through the pipe `list` is made for:
   to give back are known.
 - **`add` only guides**: macOS grants on a click (or a device-management
   profile), and writing grants is what malware does.
-- **App ids** are checked with Spotlight: one it cannot find is `GONE`,
-  except Apple's own (Spotlight does not find them all) -- and none at all
-  when Spotlight finds no apps.
+- **App ids** are `GONE` only when neither Spotlight nor LaunchServices
+  knows them: Spotlight misses helper apps inside other apps, and
+  LaunchServices, asked as root, may miss apps in a user's
+  `~/Applications`. Apple's own are never `GONE`, and none at all when
+  Spotlight finds no apps.
 - **`test`** is the only run that proves a grant: a run from a Terminal uses
   the Terminal's.
 

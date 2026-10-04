@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="94efc9c"
+SCRIPT_COMMIT="af0d639"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -137,8 +137,9 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                   GONE -> remove        the path or the app no longer exists
                   Homebrew version path: breaks on upgrade -> my-fda
                   a shell: every script it runs gets full disk access -> remove
-                Apple's own app ids are never called GONE: Spotlight does not
-                find them all.
+                An app id is GONE only when neither Spotlight nor
+                LaunchServices knows it (Spotlight misses helpers inside
+                other apps); Apple's own app ids are never called GONE.
   add <PATH>    "+": opens the Full Disk Access pane and shows PATH in Finder
                 to drag in (macOS grants only on a click), then checks that
                 it arrived
@@ -233,11 +234,12 @@ c_plutil="/usr/bin/plutil"
 c_cc="/usr/bin/cc"
 c_xcode_select="/usr/bin/xcode-select"
 c_tccutil="/usr/bin/tccutil"
+c_osascript="/usr/bin/osascript"
 _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -304,6 +306,16 @@ app_path() { # <bundle id>
   "$c_mdfind" "kMDItemCFBundleIdentifier == '$1'" 2>/dev/null | head -n 1
 }
 
+# The app's path, as LaunchServices knows it; empty when it knows none.
+# It finds what Spotlight does not index: a helper app inside another app
+# (Backblaze's bzbmenu, Claude's helper). Neither alone is enough: as root,
+# LaunchServices may not know an app in a user's ~/Applications.
+ls_path() { # <bundle id>
+  case "$1" in ""|*[!A-Za-z0-9._-]*) return 0 ;; esac
+  _lp=$("$c_osascript" -e "POSIX path of (path to application id \"$1\")" 2>/dev/null) || return 0
+  printf '%s\n' "${_lp%/}"
+}
+
 # One grant per line on stdin: type<TAB>client<TAB>auth<TAB>date.
 # Out: id<TAB>type<TAB>client<TAB>state<TAB>note<TAB>date<TAB>app path --
 # never an empty field ("-"): a TAB is IFS whitespace, and read would
@@ -335,13 +347,14 @@ classify() {
         if [ -n "$(app_path com.apple.finder)" ]; then _spot=on; else _spot=off; fi
       fi
       _x=$(app_path "$_c")
+      [ -n "$_x" ] || _x=$(ls_path "$_c")
       if [ -n "$_x" ]; then
         _n="app"
       elif [ "$_spot" = "off" ]; then
         _n="app (not checked: Spotlight finds no apps)"
       else
         case "$_c" in
-          com.apple.*) _n="app (Apple's own, not found by Spotlight: kept)" ;;
+          com.apple.*) _n="app (Apple's own, not found by Spotlight or LaunchServices: kept)" ;;
           *)           _n="GONE -> remove" ;;
         esac
       fi
@@ -931,6 +944,13 @@ t_world() {
   chmod 755 "$T_DIR/stub/"*
   c_mdfind="$T_DIR/stub/mdfind"; c_open="$T_DIR/stub/open"; c_launchctl="$T_DIR/stub/launchctl"
   c_tccutil="$T_DIR/stub/tccutil"
+  # LaunchServices knows a nested helper Spotlight does not index.
+  # shellcheck disable=SC2016  # the stub expands $2 when IT runs
+  printf '%s\n' '#!/bin/sh' \
+    'case "$2" in *com.nested.helper*) echo "/Applications/Big.app/Contents/Helper.app/" ;; *) echo "execution error (-1728)" >&2; exit 1 ;; esac' \
+    > "$T_DIR/stub/osascript"
+  chmod 755 "$T_DIR/stub/osascript"
+  c_osascript="$T_DIR/stub/osascript"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
   # shellcheck disable=SC2329  # called through need_root
   is_root() { true; }
@@ -959,6 +979,10 @@ t_found_app_is_app_with_its_path() {
 t_missing_app_is_gone() {
   _n=$(t_row 0 com.vanished.app 2 | t_note_of)
   case "$_n" in GONE*) t_pass ;; *) t_fail "got '$_n'" ;; esac
+}
+t_nested_helper_is_not_gone() {
+  _o=$(t_row 0 com.nested.helper 2 | classify | awk -F '\t' '{ print $5 "|" $7 }')
+  if [ "$_o" = "app|/Applications/Big.app/Contents/Helper.app" ]; then t_pass; else t_fail "got '$_o'"; fi
 }
 t_missing_apple_app_is_never_gone() {
   _n=$(t_row 0 com.apple.sshd-keygen-wrapper 2 | t_note_of)
@@ -1244,6 +1268,7 @@ t_err_codes_unique_in_order_without_gaps() {
 run_tests() { # [FILTER]
   for T_NAME in t_gone_path_is_gone t_existing_cellar_path_still_breaks \
                 t_found_app_is_app_with_its_path t_missing_app_is_gone \
+                t_nested_helper_is_not_gone \
                 t_missing_apple_app_is_never_gone t_spotlight_off_calls_no_app_gone \
                 t_denied_shows_the_raw_value t_shell_is_flagged \
                 t_space_in_path_stays_one_client t_summary_adds_up \
