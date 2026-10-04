@@ -1320,8 +1320,8 @@ t_err_codes_unique_in_order_without_gaps() {
   if [ "$_got" = "$_want" ]; then t_pass; else t_fail "codes '$_got'"; fi
 }
 
-run_tests() { # [FILTER]
-  for T_NAME in t_gone_path_is_gone t_existing_cellar_path_still_breaks \
+run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not ok K - name" per test
+  T_ALL="t_gone_path_is_gone t_existing_cellar_path_still_breaks \
                 t_found_app_is_app_with_its_path t_missing_app_is_gone \
                 t_nested_helper_is_not_gone \
                 t_missing_apple_app_is_never_gone t_spotlight_off_calls_no_app_gone \
@@ -1347,11 +1347,20 @@ run_tests() { # [FILTER]
                 t_config_setting_a_key_empty_names_it \
                 t_default_config_has_every_key t_config_offer_names_only_searched_paths \
                 t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
-                t_help_names_every_verb t_err_codes_unique_in_order_without_gaps; do
+                t_help_names_every_verb t_err_codes_unique_in_order_without_gaps"
+  _rt_n=0
+  for T_NAME in $T_ALL; do
+    case "$T_NAME" in *"$1"*) _rt_n=$((_rt_n + 1)) ;; esac
+  done
+  echo "1..$_rt_n"
+  _rt_k=0
+  for T_NAME in $T_ALL; do
     case "$T_NAME" in *"$1"*) ;; *) continue ;; esac
+    _rt_k=$((_rt_k + 1)); _rt_bad=$T_BAD
     t_world
     "$T_NAME"
     rm -rf "$T_DIR"
+    if [ "$T_BAD" = "$_rt_bad" ]; then echo "ok $_rt_k - $T_NAME"; else echo "not ok $_rt_k - $T_NAME"; fi
   done
   echo "tests: $T_OK passed, $T_BAD failed [$((T_OK + T_BAD))]"
   [ "$T_BAD" = "0" ]
