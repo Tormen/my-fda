@@ -57,11 +57,20 @@ any other selection goes through the pipe `list` is made for:
   the machine allows: an app id through `tccutil`, macOS's own command,
   which knows installed apps only; the rest -- paths, and apps tccutil does
   not know, such as a GONE one -- through sqlite in one transaction where
-  TCC.db can be written, else my-fda opens the pane with exactly the list
-  to take away with "-". Then the grants are read again, and anything
-  still there is an error. Even root with Full Disk Access may be refused
-  a write (macOS 26 on macado); the probe for it must really write, since
-  sqlite opens such a file read-only without a word.
+  TCC.db can be written, else my-fda opens the pane and names each one as
+  the pane does (a path's file name, an app's `.app` name) to take away
+  with "-". A GONE app neither tccutil nor sqlite can take stays, said
+  once: the pane does not show it either, and it applies to nothing. Then
+  the grants are read again, and anything else still there is an error.
+  Even root with Full Disk Access may be refused a write (macOS 26 on
+  macado); the probe for it must really write, since sqlite opens such a
+  file read-only without a word. As root, the pane and Finder open in the
+  session of the user at the screen (`launchctl asuser`): plain `open`
+  from root is refused.
+- **Listed, never removed:** an Endpoint Security extension's grant
+  (TCC.db, `kTCCServiceEndpointSecurityClient` -- the pane shows it with the
+  others) and a configuration profile's (`MDMOverrides.plist` -- the pane
+  does not show it; it goes with the profile).
 - **`reset`** is `tccutil reset SystemPolicyAllFiles`: every grant at once,
   by macOS itself; it saves the list beside the backup first, so the grants
   to give back are known.

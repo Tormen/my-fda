@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="b3d2d69"
+SCRIPT_COMMIT="b5dcb62"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -16,6 +16,9 @@ QUIET=0; VRB=0
 CONFIG_ARG=""
 TAB=$(printf '\t')
 SERVICE="kTCCServiceSystemPolicyAllFiles"
+# An Endpoint Security system extension's Full Disk Access is kept under this
+# service instead -- the pane shows it with the others, my-fda only lists it.
+SERVICE_ES="kTCCServiceEndpointSecurityClient"
 WORK=""
 PHASE="starting -- nothing was changed"
 
@@ -137,6 +140,11 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                   GONE -> remove        the path or the app no longer exists
                   Homebrew version path: breaks on upgrade -> my-fda
                   a shell: every script it runs gets full disk access -> remove
+                  system extension      an Endpoint Security extension's
+                                        grant: in the pane, not removed here
+                  profile               given by a configuration profile
+                                        (MDMOverrides.plist): not in the pane,
+                                        it goes with the profile
                 An app id is GONE only when neither Spotlight nor
                 LaunchServices knows it (Spotlight misses helpers inside
                 other apps); Apple's own app ids are never called GONE.
@@ -156,9 +164,12 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 Every change first backs up TCC.db (BACKUP_DIR). An app id
                 goes through tccutil (installed apps only); the rest through
                 sqlite where TCC.db can be written, else the pane opens with
-                the list to take away with "-". Then the grants are read
-                again, and anything still there is an error. reset is
-                tccutil's own: every grant at once.
+                the names to take away with "-". A GONE app neither can
+                take stays, said once: the pane does not show it, and it
+                applies to nothing. Then the grants are read again, and
+                anything else still there is an error. reset is tccutil's
+                own: every grant at once. Extension and profile grants are
+                never taken away by my-fda.
 
 LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda.<NAME>, root:wheel 700
   create <NAME> <TARGET>
@@ -236,11 +247,15 @@ c_cc="/usr/bin/cc"
 c_xcode_select="/usr/bin/xcode-select"
 c_tccutil="/usr/bin/tccutil"
 c_osascript="/usr/bin/osascript"
+
+# Full Disk Access given by configuration profiles (MDM) -- listed, never
+# shown in System Settings.
+MDM_OVERRIDES="/Library/Application Support/com.apple.TCC/MDMOverrides.plist"
 _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript MDM_OVERRIDES"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -327,15 +342,23 @@ ls_path() { # <bundle id>
 # collapse two of them into one.
 classify() {
   _spot=""
-  while IFS="$TAB" read -r _t _c _a _d; do
+  while IFS="$TAB" read -r _sv _t _c _a _d; do
     [ -n "$_c" ] || continue
     case "$_a" in
       2) _s="allowed[2]" ;;
       0) _s="denied[0]" ;;
       *) _s="other[$_a]" ;;
     esac
-    _n="-"; _x=""
-    if [ "$_t" = "1" ]; then
+    _n="-"; _x=""; _idk=$_t
+    # Grants my-fda lists but does not take away: their own notes, their
+    # own IDs (the same client may also hold a plain grant).
+    case "$_sv" in
+      "$SERVICE_ES") _n="system extension (Endpoint Security): in the pane, not removed by my-fda"; _idk="es$_t" ;;
+      mdm)           _n="profile: not in System Settings -- it goes with the profile"; _idk="mdm" ;;
+    esac
+    if [ "$_sv" != "$SERVICE" ]; then
+      :
+    elif [ "$_t" = "1" ]; then
       if [ ! -e "$_c" ]; then
         _n="GONE -> remove"
       else
@@ -366,7 +389,7 @@ classify() {
     else
       _n="unknown client type [$_t]"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(grant_id "$_t" "$_c")" "$_t" "$_c" "$_s" "$_n" "${_d:--}" "${_x:--}"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(grant_id "$_idk" "$_c")" "$_t" "$_c" "$_s" "$_n" "${_d:--}" "${_x:--}"
   done
 }
 
@@ -396,10 +419,12 @@ summary() {
     $5 ~ /^Homebrew/ { brew++ }
     $5 ~ /^a shell/  { shell++ }
     $5 ~ /^app/      { app++ }
+    $5 ~ /^system extension/ { ext++ }
+    $5 ~ /^profile/  { prof++ }
     END {
-      other = rows - gone - brew - shell - app
-      printf "%d grant(s): %d gone, %d on a Homebrew version path, %d shell(s), %d app(s), %d other [rows %d]\n",
-        rows, gone, brew, shell, app, other, rows
+      other = rows - gone - brew - shell - app - ext - prof
+      printf "%d grant(s): %d gone, %d on a Homebrew version path, %d shell(s), %d app(s), %d system extension(s), %d from profiles, %d other [rows %d]\n",
+        rows, gone, brew, shell, app, ext, prof, other, rows
     }'
 }
 
@@ -407,7 +432,7 @@ summary() {
 grants_to() { # <FILE>
   [ -x "$c_sqlite3" ] || err 00020 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
   if ! "$c_sqlite3" -readonly -separator "$TAB" "$TCC_DB" \
-       "select client_type, client, auth_value, datetime(last_modified,'unixepoch') from access where service='$SERVICE' order by client;" \
+       "select service, client_type, client, auth_value, datetime(last_modified,'unixepoch') from access where service in ('$SERVICE', '$SERVICE_ES') order by client;" \
        > "$WORK/rows" 2> "$WORK/rows.err"; then
     _e=$(cat "$WORK/rows.err")
     case "$_e" in
@@ -416,8 +441,32 @@ grants_to() { # <FILE>
       *) err 00022 "sqlite3 failed on '$TCC_DB': $_e" ;;
     esac
   fi
+  mdm_rows >> "$WORK/rows"
   classify < "$WORK/rows" > "$1"
 }
+
+# Full Disk Access granted by a configuration profile (MDM, PPPC): kept in
+# MDMOverrides.plist, never shown in System Settings. One row per client
+# with a Full Disk Access entry: mdm<TAB>type<TAB>client<TAB>auth<TAB>-,
+# auth 2 for Allowed true, 0 for false. Nothing when there is no file.
+mdm_rows() {
+  [ -e "$MDM_OVERRIDES" ] || return 0
+  if ! "$c_plutil" -p "$MDM_OVERRIDES" > "$WORK/mdm.txt" 2> "$WORK/mdm.err"; then
+    warn "    > cannot read $MDM_OVERRIDES ($(tr '\n' ' ' < "$WORK/mdm.err")) -- grants from profiles are not listed"
+    return 0
+  fi
+  awk -v svc="$SERVICE" -v tab="$TAB" '
+    /^  "/ && / => \{$/ { c = $0; sub(/^  "/, "", c); sub(/" => \{$/, "", c); insvc = 0; next }
+    /^    "/          { insvc = (index($0, "\"" svc "\" => {") > 0); next }
+    insvc && /"Allowed" => / {
+      a = $0; sub(/.*=> /, "", a)
+      printf "mdm%s%s%s%s%s%s%s-\n", tab, (substr(c, 1, 1) == "/") ? 1 : 0, tab, c, tab, (a == "1" || a == "true") ? 2 : 0, tab
+      insvc = 0
+    }' "$WORK/mdm.txt"
+}
+
+# Grants my-fda takes away -- not those of a system extension or a profile.
+ours() { awk -F '\t' '$5 !~ /^(system extension|profile)/'; }
 
 sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
 
@@ -446,7 +495,7 @@ tcc_writable() {
 # The grants of <FILE> (classified lines) that are still there, read afresh.
 still_there() { # <FILE>
   grants_to "$WORK/after"
-  awk -F '\t' 'NR == FNR { k[$2 FS $3] = 1; next } ($2 FS $3) in k' "$WORK/after" "$1"
+  awk -F '\t' 'NR == FNR { k[$1] = 1; next } $1 in k' "$WORK/after" "$1"
 }
 
 # Take away the grants in <FILE>, each the one way this machine allows: an
@@ -472,18 +521,31 @@ take_away() { # <FILE>
     printf '%s\n' "$_line" >> "$WORK/rest"
   done < "$1"
   _hand=0
+  : > "$WORK/stays"; : > "$WORK/byhand"
   if [ -s "$WORK/rest" ]; then
     if tcc_writable; then
       sqlite_delete "$WORK/rest"
       VIA_SQL=$(wc -l < "$WORK/rest" | tr -d ' ')
     else
-      guide_removal "$WORK/rest"; _hand=1
+      # A GONE app tccutil does not know cannot go at all here: not by
+      # sqlite, and not by hand -- the pane does not show it. It applies to
+      # nothing, so it stays, said once, and is not an error.
+      awk -F '\t' '$2 == "0" && $5 ~ /^GONE/' "$WORK/rest" > "$WORK/stays"
+      awk -F '\t' '!($2 == "0" && $5 ~ /^GONE/)' "$WORK/rest" > "$WORK/byhand"
+      if [ -s "$WORK/stays" ]; then
+        say " >>> these stay: the app is gone, so tccutil does not know it, TCC.db cannot be written, and the pane does not show it -- it applies to nothing:"
+        awk -F '\t' '{ printf "      %s   [%s]\n", $3, $1 }' "$WORK/stays"
+      fi
+      [ -s "$WORK/byhand" ] && { guide_removal "$WORK/byhand"; _hand=1; }
     fi
   fi
-  still_there "$1" > "$WORK/left"
+  STAYS=$(wc -l < "$WORK/stays" | tr -d ' ')
+  still_there "$1" > "$WORK/still"
+  awk -F '\t' 'NR == FNR { k[$1] = 1; next } !($1 in k)' "$WORK/stays" "$WORK/still" > "$WORK/left"
   REMAINING=$(wc -l < "$WORK/left" | tr -d ' ')
-  [ "$_hand" = "1" ] && VIA_HAND=$(( $(wc -l < "$WORK/rest" | tr -d ' ') - REMAINING ))
-  TOOK="[tccutil $VIA_TCC, sqlite $VIA_SQL, by hand $VIA_HAND; remaining $REMAINING]"
+  [ "$_hand" = "1" ] && VIA_HAND=$(( $(wc -l < "$WORK/byhand" | tr -d ' ') - REMAINING ))
+  TAKEN=$((VIA_TCC + VIA_SQL + VIA_HAND))
+  TOOK="[tccutil $VIA_TCC, sqlite $VIA_SQL, by hand $VIA_HAND, stay $STAYS; remaining $REMAINING]"
   if [ "$REMAINING" != "0" ]; then
     render < "$WORK/left" | sed 's/^/    /' 1>&2
     err 00027 "$REMAINING grant(s) still there $TOOK -- TCC.db backup: $BACKUP_FILE"
@@ -587,7 +649,8 @@ cmd_add() { # <PATH>
     esac
   done
   PHASE="reading the grants -- nothing was changed"
-  grants_to "$WORK/all"
+  grants_to "$WORK/every"
+  ours < "$WORK/every" > "$WORK/all"
   awk -F '\t' -v c="$_p" '$2 == "1" && $3 == c' "$WORK/all" > "$WORK/row"
   if [ -s "$WORK/row" ]; then
     case "$(cut -f 4 "$WORK/row")" in
@@ -645,6 +708,8 @@ cmd_remove() { # [go] [ID...]
     grep -qxF "$_m" "$WORK/sel" || printf '%s\n' "$_m" >> "$WORK/sel"
   done < "$WORK/ids"
   [ -z "$_bad" ] || err 00040 "no such grant:$_bad -- nothing was changed ($US list shows the IDs)"
+  _not=$(awk -F '\t' '$5 ~ /^(system extension|profile)/ { printf " %s", $1 }' "$WORK/sel")
+  [ -z "$_not" ] || err 00041 "not taken away by $US:$_not -- a system extension's grant goes in System Settings, a profile's with the profile; nothing was changed"
   _k=$(wc -l < "$WORK/sel" | tr -d ' ')
   render < "$WORK/sel"
   if [ "$_go" = "0" ]; then
@@ -652,14 +717,14 @@ cmd_remove() { # [go] [ID...]
     return 0
   fi
   take_away "$WORK/sel"
-  msg "removed $_k grant(s) $TOOK -- TCC.db backup: $BACKUP_FILE"
+  msg "removed $TAKEN of $_k grant(s) $TOOK -- TCC.db backup: $BACKUP_FILE"
 }
 
 # The GONE grants -- the one class safe to take away without looking: nothing
 # is left that the grant could apply to. The same delete path as remove.
 cmd_cleanup() { # [go]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 0 ] || err 00041 "cleanup takes no IDs -- '$US remove' takes some"
+  [ $# -eq 0 ] || err 00042 "cleanup takes no IDs -- '$US remove' takes some"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
   awk -F '\t' '$5 ~ /^GONE/' "$WORK/all" > "$WORK/sel"
@@ -674,14 +739,15 @@ cmd_cleanup() { # [go]
     return 0
   fi
   take_away "$WORK/sel"
-  msg "cleaned up $_k GONE grant(s) $TOOK -- TCC.db backup: $BACKUP_FILE"
+  msg "cleaned up $TAKEN of $_k GONE grant(s) $TOOK -- TCC.db backup: $BACKUP_FILE"
 }
 
 cmd_reset() { # [go]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 0 ] || err 00042 "reset takes no IDs -- '$US remove' takes some"
+  [ $# -eq 0 ] || err 00043 "reset takes no IDs -- '$US remove' takes some"
   PHASE="reading the grants -- nothing was changed"
-  grants_to "$WORK/all"
+  grants_to "$WORK/every"
+  ours < "$WORK/every" > "$WORK/all"
   _k=$(wc -l < "$WORK/all" | tr -d ' ')
   if [ "$_k" = "0" ]; then msg "no grants -- nothing to reset"; return 0; fi
   render < "$WORK/all"
@@ -692,15 +758,15 @@ cmd_reset() { # [go]
     return 0
   fi
   BACKUP_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p "$BACKUP_DIR" || err 00043 "cannot create BACKUP_DIR '$BACKUP_DIR'"
+  mkdir -p "$BACKUP_DIR" || err 00044 "cannot create BACKUP_DIR '$BACKUP_DIR'"
   _l="$BACKUP_DIR/list.$BACKUP_STAMP.txt"
-  VRB=1 render < "$WORK/all" > "$_l" || err 00044 "cannot save the list to '$_l' -- nothing was changed"
+  VRB=1 render < "$WORK/all" > "$_l" || err 00045 "cannot save the list to '$_l' -- nothing was changed"
   backup_tcc
   # macOS's own bulk command: no app lookup, no writable TCC.db needed.
   PHASE="taking all grants away -- TCC.db backup: $BACKUP_FILE, the list: $_l"
   [ "$VRB" = "1" ] && printf ' >>> %s reset SystemPolicyAllFiles\n' "$c_tccutil"
   "$c_tccutil" reset SystemPolicyAllFiles < /dev/null > "$WORK/tccutil.out" 2>&1; _rc=$?
-  [ "$_rc" = "0" ] || err 00045 "tccutil reset SystemPolicyAllFiles failed [rc $_rc]: $(cat "$WORK/tccutil.out") -- backup: $BACKUP_FILE"
+  [ "$_rc" = "0" ] || err 00046 "tccutil reset SystemPolicyAllFiles failed [rc $_rc]: $(cat "$WORK/tccutil.out") -- backup: $BACKUP_FILE"
   msg "took away all $_k grant(s) [tccutil rc $_rc] -- TCC.db backup: $BACKUP_FILE, the list: $_l"
   msg "    > not checked here: this Terminal lost its grant too -- give it back, then $US list"
   msg " >>> to give back what had been allowed:"
@@ -759,7 +825,7 @@ int main(int argc, char **argv) {
 
     rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
     if (rc != 0) {
-        fprintf(stderr, "ERROR 00046 [70]: my-fda." MY_FDA_NAME ": cannot start %s: %s\n",
+        fprintf(stderr, "ERROR 00047 [70]: my-fda." MY_FDA_NAME ": cannot start %s: %s\n",
                 MY_FDA_TARGET, strerror(rc));
         return 70;
     }
@@ -767,7 +833,7 @@ int main(int argc, char **argv) {
 
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
-            fprintf(stderr, "ERROR 00047 [70]: my-fda." MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            fprintf(stderr, "ERROR 00048 [70]: my-fda." MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
             return 70;
         }
     }
@@ -784,7 +850,7 @@ marker_of() { # <launcher>
 
 check_name() { # <NAME>
   case "$1" in
-    ""|*[!A-Za-z0-9._-]*) err 00048 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+    ""|*[!A-Za-z0-9._-]*) err 00049 "name '$1': letters, digits, '.', '_' and '-' only" ;;
   esac
 }
 
@@ -802,39 +868,39 @@ daemons_to() { # <FILE>
 }
 
 cmd_create() { # <NAME> <TARGET>
-  [ $# -eq 2 ] || err 00049 "usage: $US create <NAME> <TARGET>"
+  [ $# -eq 2 ] || err 00050 "usage: $US create <NAME> <TARGET>"
   check_name "$1"
   _t=$2
   _l="$HELPER_DIR/my-fda.$1"
-  case "$_t" in /*) ;; *) err 00050 "target '$_t' must be an absolute path" ;; esac
-  case "$_t" in *\"*|*\\*) err 00051 "target '$_t': no '\"' or '\\' in the path" ;; esac
-  [ -f "$_t" ] && [ -x "$_t" ] || err 00052 "target '$_t' is not an executable file"
+  case "$_t" in /*) ;; *) err 00051 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00052 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00053 "target '$_t' is not an executable file"
   for _cel in $BREW_CELLARS; do
     case "$_t" in "$_cel"/*)
-      err 00053 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+      err 00054 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
     esac
   done
   for _sh in $SHELLS; do
-    [ "$_t" = "$_sh" ] && err 00054 "target '$_t' is a shell: every script it runs would get full disk access"
+    [ "$_t" = "$_sh" ] && err 00055 "target '$_t' is a shell: every script it runs would get full disk access"
   done
-  [ -e "$_l" ] && err 00055 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  [ -e "$_l" ] && err 00056 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00056 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00057 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00057 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00058 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
   run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00058 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00059 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00059 "the built launcher does not carry its target marker -- not installed"
+    || err 00060 "the built launcher does not carry its target marker -- not installed"
   if [ "$(id -u)" = "0" ]; then run install -m 700 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 700 "$WORK/launcher" "$_l"; fi || err 00060 "cannot install '$_l'"
+  else run install -m 700 "$WORK/launcher" "$_l"; fi || err 00061 "cannot install '$_l'"
   msg "created $_l -> $_t [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it, and $US test $1"
 }
@@ -843,12 +909,12 @@ cmd_create() { # <NAME> <TARGET>
 launcher_of() { # <NAME>
   check_name "$1"
   _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00061 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00062 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00062 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00063 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -891,17 +957,17 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00063 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00064 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00064 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00065 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00065 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00066 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00066 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00067 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -913,7 +979,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00067 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00068 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -930,7 +996,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00068 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00069 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
@@ -993,6 +1059,7 @@ t_world() {
     > "$T_DIR/stub/osascript"
   chmod 755 "$T_DIR/stub/osascript"
   c_osascript="$T_DIR/stub/osascript"
+  MDM_OVERRIDES="$T_DIR/MDMOverrides.plist"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
   # shellcheck disable=SC2329  # called through need_root
   is_root() { true; }
@@ -1003,7 +1070,7 @@ t_grant() { # <type> <client> [auth] [service] -- quotes on its own, never throu
 }
 t_count() { "$c_sqlite3" "$TCC_DB" "select count(*) from access where service='$SERVICE';"; }
 t_id() { grant_id "$1" "$2"; }
-t_row() { printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "2026-09-29 12:00:00"; }
+t_row() { printf '%s\t%s\t%s\t%s\t%s\n' "$SERVICE" "$1" "$2" "$3" "2026-09-29 12:00:00"; }
 t_note_of() { classify | awk -F '\t' '{ print $5 }'; }
 
 t_gone_path_is_gone() {
@@ -1050,7 +1117,7 @@ t_space_in_path_stays_one_client() {
 t_summary_adds_up() {
   _o=$({ t_row 1 "$T_DIR/nope" 2; t_row 1 "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" 2
          t_row 1 /bin/sh 2; t_row 0 com.known.app 2; t_row 1 "$T_DIR/bin/tool" 2; } | classify | summary)
-  if [ "$_o" = "5 grant(s): 1 gone, 1 on a Homebrew version path, 1 shell(s), 1 app(s), 1 other [rows 5]" ]; then t_pass; else t_fail "got '$_o'"; fi
+  if [ "$_o" = "5 grant(s): 1 gone, 1 on a Homebrew version path, 1 shell(s), 1 app(s), 0 system extension(s), 0 from profiles, 1 other [rows 5]" ]; then t_pass; else t_fail "got '$_o'"; fi
 }
 t_id_is_first_stable_and_cut_returns_it() {
   t_grant 1 "$T_DIR/bin/tool"; t_grant 0 com.known.app
@@ -1083,7 +1150,7 @@ t_remove_go_takes_only_the_named_and_backs_up() {
   _bk=$(find "$BACKUP_DIR" -name 'TCC.db.*' 2>/dev/null | head -n 1)
   _bn=$("$c_sqlite3" "$_bk" "select count(*) from access where service='$SERVICE';" 2>/dev/null)
   if [ "$_left" = "$T_DIR/bin/tool com.known.app " ] && [ "$_cam" = "1" ] && [ "$_bn" = "3" ] \
-     && case "$_o" in *"removed 1 grant(s) [tccutil 0, sqlite 1, by hand 0; remaining 0]"*) true ;; *) false ;; esac
+     && case "$_o" in *"removed 1 of 1 grant(s) [tccutil 0, sqlite 1, by hand 0, stay 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "left '$_left' cam $_cam backup $_bn, '$_o'"; fi
 }
 t_remove_reads_ids_from_a_list_pipe() {
@@ -1121,7 +1188,7 @@ t_installed_app_goes_through_tccutil() {
   _left=$("$c_sqlite3" "$TCC_DB" "select client from access;")
   _log=$(cat "$T_DIR/stub/tccutil.log" 2>/dev/null)
   if [ "$_left" = "$T_DIR/bin/tool" ] && [ "$_log" = "reset SystemPolicyAllFiles com.known.app" ] && [ ! -e "$WORK/delete.sql" ] \
-     && case "$_o" in *"[tccutil 1, sqlite 0, by hand 0; remaining 0]"*) true ;; *) false ;; esac
+     && case "$_o" in *"[tccutil 1, sqlite 0, by hand 0, stay 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "left '$_left' tccutil '$_log', '$_o'"; fi
 }
 t_gone_app_falls_back_to_sqlite() {
@@ -1129,7 +1196,7 @@ t_gone_app_falls_back_to_sqlite() {
   _o=$(cmd_cleanup go 2>&1)
   _log=$(cat "$T_DIR/stub/tccutil.log" 2>/dev/null)
   if [ "$(t_count)" = "0" ] && [ "$_log" = "reset SystemPolicyAllFiles com.vanished.app" ] \
-     && case "$_o" in *"[tccutil 0, sqlite 1, by hand 0; remaining 0]"*) true ;; *) false ;; esac
+     && case "$_o" in *"[tccutil 0, sqlite 1, by hand 0, stay 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "count $(t_count) tccutil '$_log', '$_o'"; fi
 }
 t_readonly_db_guides_and_fails() {
@@ -1141,8 +1208,50 @@ t_readonly_db_guides_and_fails() {
   _pane=$(cat "$T_DIR/stub/open.log" 2>/dev/null)
   _shown=$(printf '%s\n' "$_o" | grep -c "^[0-9a-f]\{6\}${TAB}com.vanished.app")
   if [ "$_rc" != "0" ] && [ "$(t_count)" = "2" ] && [ "$_pane" = "x-test-pane" ] && [ "$_shown" = "1" ] \
-     && case "$_o" in *"cannot be written here"*"take these 2 away by hand"*"2 grant(s) still there [tccutil 0, sqlite 0, by hand 0; remaining 2]"*) true ;; *) false ;; esac
+     && case "$_o" in *"these stay"*"com.vanished.app"*"take these 1 away by hand"*"1 grant(s) still there [tccutil 0, sqlite 0, by hand 0, stay 1; remaining 1]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "rc $_rc count $(t_count) pane '$_pane' shown $_shown, '$_o'"; fi
+}
+t_gone_app_stays_where_nothing_can_take_it() {
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
+  t_grant 0 com.vanished.app
+  chmod 444 "$TCC_DB"
+  _o=$(cmd_cleanup go < /dev/null 2>&1); _rc=$?
+  chmod 644 "$TCC_DB"
+  if [ "$_rc" = "0" ] && [ "$(t_count)" = "1" ] && [ ! -e "$T_DIR/stub/open.log" ] \
+     && case "$_o" in *"these stay"*"cleaned up 0 of 1 GONE grant(s) [tccutil 0, sqlite 0, by hand 0, stay 1; remaining 0]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "rc $_rc count $(t_count), '$_o'"; fi
+}
+t_extension_grant_is_listed_and_not_taken_away() {
+  t_grant 0 com.example.es 2 "$SERVICE_ES"; t_grant 1 "$T_DIR/bin/tool"
+  _l=$(QUIET=1 cmd_list)
+  _id=$(printf '%s\n' "$_l" | awk -F '\t' '/com.example.es/ { print $1 }')
+  case "$_l" in *"com.example.es"*"system extension"*) ;; *) t_fail "list '$_l'"; return ;; esac
+  _o=$(cmd_remove go "$_id" 2>&1); _rc=$?
+  _es=$("$c_sqlite3" "$TCC_DB" "select count(*) from access where service='$SERVICE_ES';")
+  if [ "$_rc" != "0" ] && [ "$_es" = "1" ] && [ ! -d "$BACKUP_DIR" ]; then t_pass; else t_fail "rc $_rc es $_es, '$_o'"; fi
+}
+t_profile_grants_are_listed() {
+  cat > "$MDM_OVERRIDES" <<'_PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.foo.bar</key><dict><key>kTCCServiceSystemPolicyAllFiles</key><dict><key>Allowed</key><true/><key>CodeRequirementData</key><data>AAAA</data></dict></dict>
+<key>/usr/local/bin/x</key><dict><key>kTCCServiceSystemPolicyAllFiles</key><dict><key>Allowed</key><false/></dict></dict>
+<key>com.cam.only</key><dict><key>kTCCServiceCamera</key><dict><key>Allowed</key><true/></dict></dict>
+</dict></plist>
+_PL
+  _l=$(cmd_list 2>&1)
+  _f=$(printf '%s\n' "$_l" | awk -F '\t' '{ print $2 }' | awk '/profile/ { print $1 "|" $2 }' | sort | tr '\n' ' ')
+  if [ "$_f" = "/usr/local/bin/x|denied[0] com.foo.bar|allowed[2] " ] && case "$_l" in *"2 from profiles"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "got '$_f', '$_l'"; fi
+}
+t_reset_leaves_extension_grants() {
+  t_grant 0 com.example.es 2 "$SERVICE_ES"; t_grant 1 "$T_DIR/bin/tool"
+  _o=$(cmd_reset go 2>&1)
+  _es=$("$c_sqlite3" "$TCC_DB" "select count(*) from access where service='$SERVICE_ES';")
+  if [ "$_es" = "1" ] && [ "$(t_count)" = "0" ] && case "$_o" in *"all 1 grant(s)"*) true ;; *) false ;; esac \
+     && case "$_o" in *com.example.es*) false ;; *) true ;; esac
+  then t_pass; else t_fail "es $_es count $(t_count), '$_o'"; fi
 }
 t_guide_names_each_grant_as_the_pane_does() {
   printf 'sqlite says no\n' > "$WORK/probe"
@@ -1165,7 +1274,7 @@ t_cleanup_go_takes_only_the_gone() {
   _o=$(cmd_cleanup go 2>&1)
   _left=$("$c_sqlite3" "$TCC_DB" "select client from access order by client;" | tr '\n' ' ')
   if [ "$_left" = "/bin/sh $T_DIR/bin/tool com.apple.sshd-keygen-wrapper com.known.app " ] \
-     && case "$_o" in *"cleaned up 2 GONE grant(s) [tccutil 0, sqlite 2, by hand 0; remaining 0]"*) true ;; *) false ;; esac
+     && case "$_o" in *"cleaned up 2 of 2 GONE grant(s) [tccutil 0, sqlite 2, by hand 0, stay 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "left '$_left', '$_o'"; fi
 }
 t_cleanup_with_nothing_gone_is_nothing_to_do() {
@@ -1346,6 +1455,8 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
                 t_installed_app_goes_through_tccutil t_gone_app_falls_back_to_sqlite \
                 t_readonly_db_guides_and_fails t_guide_names_each_grant_as_the_pane_does \
+                t_gone_app_stays_where_nothing_can_take_it t_extension_grant_is_listed_and_not_taken_away \
+                t_profile_grants_are_listed t_reset_leaves_extension_grants \
                 t_cleanup_without_go_changes_nothing t_cleanup_go_takes_only_the_gone \
                 t_cleanup_with_nothing_gone_is_nothing_to_do \
                 t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
@@ -1389,14 +1500,14 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00069 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00070 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
     --list|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00070 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00071 "unknown option '$_a' (--help)" ;;
+                      err 00071 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00072 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -1405,14 +1516,14 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00072 "no such command; you mean \`$US remove\`" ;;
+  rm)  err 00073 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00073 "unknown command '$CMD' (--help)" ;;
+  *)   err 00074 "unknown command '$CMD' (--help)" ;;
 esac
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00074 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00075 "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 
