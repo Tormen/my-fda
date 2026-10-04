@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="a47d962"
+SCRIPT_COMMIT="ba0f7d9"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -490,6 +490,22 @@ take_away() { # <FILE>
   fi
 }
 
+# Open something on the screen. Root's shell is outside the GUI session, and
+# macOS refuses to launch an app from there (`open` failed with launchd's
+# "Domain does not support specified action", macado 2026-10-04), so as root
+# it runs inside the session of the user at the screen: the owner of
+# /dev/console.
+gui_open() { # <open args...>
+  if is_root; then
+    _cu=$(/bin/ls -ln /dev/console 2>/dev/null | awk '{ print $3 }')
+    case "$_cu" in
+      ""|0|*[!0-9]*) ;;
+      *) run "$c_launchctl" asuser "$_cu" "$c_open" "$@"; return ;;
+    esac
+  fi
+  run "$c_open" "$@"
+}
+
 # Where TCC.db cannot be written: open the pane, name exactly what to take
 # away with "-", and wait for it when someone is at the keyboard.
 guide_removal() { # <FILE>
@@ -497,7 +513,7 @@ guide_removal() { # <FILE>
   say " >>> TCC.db cannot be written here -- macOS refuses it, even for root [sqlite: $(tr '\n' ' ' < "$WORK/probe")]"
   say "    > take these $_n away by hand: System Settings > Full Disk Access, select each, then -"
   render < "$1" | sed 's/^/    /'
-  run "$c_open" "$FDA_PANE_URL" || warn "    > could not open the pane ($FDA_PANE_URL) -- open it by hand"
+  gui_open "$FDA_PANE_URL" || warn "    > could not open the pane ($FDA_PANE_URL) -- open it by hand"
   if [ -t 0 ] && [ -r /dev/tty ]; then
     PHASE="waiting for grants to be taken away by hand -- TCC.db backup: $BACKUP_FILE; '$US list' shows what is gone"
     printf '    > press Return when they are gone: '
@@ -561,8 +577,8 @@ cmd_add() { # <PATH>
       *) msg " >>> listed, but not allowed -- switch it on in the pane:"; render < "$WORK/row" | sed 's/^/    /' ;;
     esac
   fi
-  run "$c_open" "$FDA_PANE_URL" || err 00034 "could not open the Full Disk Access pane ($FDA_PANE_URL)"
-  run "$c_open" -R "$_p" || err 00035 "could not show '$_p' in Finder"
+  gui_open "$FDA_PANE_URL" || err 00034 "could not open the Full Disk Access pane ($FDA_PANE_URL)"
+  gui_open -R "$_p" || err 00035 "could not show '$_p' in Finder"
   say " >>> Full Disk Access is open, and $_p is selected in Finder:"
   say "    > drag it into the list (or: +, then Cmd-Shift-G, paste the path)"
   if [ -t 0 ] && [ -r /dev/tty ]; then
@@ -936,7 +952,10 @@ t_world() {
     'case "$1" in *com.apple.finder*) echo /System/Library/CoreServices/Finder.app ;;' \
     '  *com.known.app*) echo /Applications/Known.app ;; esac' > "$T_DIR/stub/mdfind"
   printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/open.log'" > "$T_DIR/stub/open"
-  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/launchctl.log'" > "$T_DIR/stub/launchctl"
+  # launchctl logs what it gets; `asuser <uid> <program...>` runs the program
+  # shellcheck disable=SC2016  # the stub expands $1 and $@ when IT runs
+  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/launchctl.log'" \
+    '[ "$1" = asuser ] && { shift 2; exec "$@"; }' 'exit 0' > "$T_DIR/stub/launchctl"
   # tccutil as macado showed it: it knows installed apps only (rc 64 for any
   # other id); with no id it takes every grant of the service.
   # shellcheck disable=SC2016  # the stub expands $1..$3 when IT runs
@@ -1149,6 +1168,14 @@ t_add_opens_the_pane_and_shows_the_file() {
   _log=$(tr '\n' '|' < "$T_DIR/stub/open.log" 2>/dev/null)
   if [ "$_log" = "x-test-pane|-R $T_DIR/bin/tool|" ]; then t_pass; else t_fail "open got '$_log', '$_o'"; fi
 }
+t_as_root_open_runs_in_the_screen_users_session() {
+  _cu=$(/bin/ls -ln /dev/console | awk '{ print $3 }')
+  [ "$_cu" = "0" ] && { echo "  SKIP  $T_NAME -- root is at the screen"; t_pass; return; }
+  _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
+  _lc=$(tr '\n' '|' < "$T_DIR/stub/launchctl.log" 2>/dev/null)
+  _want="asuser $_cu $T_DIR/stub/open x-test-pane|asuser $_cu $T_DIR/stub/open -R $T_DIR/bin/tool|"
+  if [ "$_lc" = "$_want" ]; then t_pass; else t_fail "launchctl got '$_lc', want '$_want', '$_o'"; fi
+}
 t_add_already_granted_opens_nothing() {
   t_grant 1 "$T_DIR/bin/tool"
   _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
@@ -1295,6 +1322,7 @@ run_tests() { # [FILTER]
                 t_cleanup_with_nothing_gone_is_nothing_to_do \
                 t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
                 t_add_opens_the_pane_and_shows_the_file t_add_already_granted_opens_nothing \
+                t_as_root_open_runs_in_the_screen_users_session \
                 t_create_refuses_what_it_must t_launcher_passes_args_status_and_carries_its_target \
                 t_status_shows_target_grant_and_daemon t_test_kickstarts_the_one_daemon \
                 t_test_refuses_unused_and_ambiguous t_destroy_shows_then_go_deletes_launcher_and_grant \
