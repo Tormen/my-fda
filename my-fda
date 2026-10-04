@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="ba0f7d9"
+SCRIPT_COMMIT="f674b5e"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -477,7 +477,7 @@ take_away() { # <FILE>
       sqlite_delete "$WORK/rest"
       VIA_SQL=$(wc -l < "$WORK/rest" | tr -d ' ')
     else
-      guide_removal "$WORK/rest"; _hand=1
+      guide_removal "$WORK/rest" "$1"; _hand=1
     fi
   fi
   still_there "$1" > "$WORK/left"
@@ -508,11 +508,17 @@ gui_open() { # <open args...>
 
 # Where TCC.db cannot be written: open the pane, name exactly what to take
 # away with "-", and wait for it when someone is at the keyboard.
-guide_removal() { # <FILE>
+# The list is printed only when it differs from the one just shown -- when
+# tccutil took some of them; otherwise it would repeat it line for line.
+guide_removal() { # <FILE left> <FILE shown>
   _n=$(wc -l < "$1" | tr -d ' ')
   say " >>> TCC.db cannot be written here -- macOS refuses it, even for root [sqlite: $(tr '\n' ' ' < "$WORK/probe")]"
-  say "    > take these $_n away by hand: System Settings > Full Disk Access, select each, then -"
-  render < "$1" | sed 's/^/    /'
+  if cmp -s "$1" "$2"; then
+    say "    > take all $_n away by hand: System Settings > Full Disk Access, select each, then -"
+  else
+    say "    > take these $_n away by hand: System Settings > Full Disk Access, select each, then -"
+    render < "$1" | sed 's/^/    /'
+  fi
   gui_open "$FDA_PANE_URL" || warn "    > could not open the pane ($FDA_PANE_URL) -- open it by hand"
   if [ -t 0 ] && [ -r /dev/tty ]; then
     PHASE="waiting for grants to be taken away by hand -- TCC.db backup: $BACKUP_FILE; '$US list' shows what is gone"
@@ -1121,9 +1127,20 @@ t_readonly_db_guides_and_fails() {
   _o=$(cmd_cleanup go < /dev/null 2>&1); _rc=$?
   chmod 644 "$TCC_DB"
   _pane=$(cat "$T_DIR/stub/open.log" 2>/dev/null)
-  if [ "$_rc" != "0" ] && [ "$(t_count)" = "2" ] && [ "$_pane" = "x-test-pane" ] \
-     && case "$_o" in *"cannot be written here"*"2 grant(s) still there [tccutil 0, sqlite 0, by hand 0; remaining 2]"*) true ;; *) false ;; esac
-  then t_pass; else t_fail "rc $_rc count $(t_count) pane '$_pane', '$_o'"; fi
+  _shown=$(printf '%s\n' "$_o" | grep -c "^[0-9a-f]\{6\}${TAB}com.vanished.app")
+  if [ "$_rc" != "0" ] && [ "$(t_count)" = "2" ] && [ "$_pane" = "x-test-pane" ] && [ "$_shown" = "1" ] \
+     && case "$_o" in *"cannot be written here"*"take all 2 away by hand"*"2 grant(s) still there [tccutil 0, sqlite 0, by hand 0; remaining 2]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "rc $_rc count $(t_count) pane '$_pane' shown $_shown, '$_o'"; fi
+}
+t_guide_lists_only_what_is_left() {
+  printf 'sqlite says no\n' > "$WORK/probe"
+  { t_row 0 com.known.app 2; t_row 1 "$T_DIR/nope" 2; } | classify > "$WORK/shown"
+  t_row 1 "$T_DIR/nope" 2 | classify > "$WORK/left"
+  _o=$(guide_removal "$WORK/left" "$WORK/shown" < /dev/null 2>&1)
+  case "$_o" in
+    *"take these 1 away"*"$T_DIR/nope"*) case "$_o" in *com.known.app*) t_fail "lists what tccutil took: '$_o'" ;; *) t_pass ;; esac ;;
+    *) t_fail "got '$_o'" ;;
+  esac
 }
 t_cleanup_without_go_changes_nothing() {
   t_grant 1 "$T_DIR/nope"
@@ -1317,7 +1334,7 @@ run_tests() { # [FILTER]
                 t_remove_empty_pipe_is_nothing_to_do \
                 t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
                 t_installed_app_goes_through_tccutil t_gone_app_falls_back_to_sqlite \
-                t_readonly_db_guides_and_fails \
+                t_readonly_db_guides_and_fails t_guide_lists_only_what_is_left \
                 t_cleanup_without_go_changes_nothing t_cleanup_go_takes_only_the_gone \
                 t_cleanup_with_nothing_gone_is_nothing_to_do \
                 t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
