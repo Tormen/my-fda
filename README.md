@@ -20,7 +20,12 @@ as responsible for everything it runs, so the target gets the launcher's
 grant.
 
 - A launcher is `/Library/PrivilegedHelperTools/my-fda.<NAME>`, root:wheel
-  700, and reads as `my-fda.<NAME>` in the Full Disk Access list.
+  744, and reads as `my-fda.<NAME>` in the Full Disk Access list. Readable by
+  everyone, because System Settings, which runs as the screen's user, reads
+  the file to add it (a file only root can read is refused there without a
+  word); run by root only, because the grant is that path's. `add` makes an
+  older 700 launcher readable first, and refuses any other file the screen's
+  user cannot read, saying why.
 - `create` builds it on the machine with its own `cc` (Command Line Tools);
   the C source lives inside `my-fda`, never a binary in git.
 - It spawns the target and waits, so the process holding the grant lives for
