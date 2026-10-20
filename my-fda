@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="e2e9edb"
+SCRIPT_COMMIT="d07f2a6"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -201,7 +201,7 @@ Every command needs root, run from a Terminal that has Full Disk Access
 itself: the permission database is protected.
 
 OPTIONS
-  -V, --verbose         also: each command before it runs, the date of each
+  -V, --verbose         also: each command before it runs, the date (local time) of each
                         grant, an app's path
   -Q, --quiet           nothing but errors -- and the plans that go acts on
   --config <FILE>       use this config, bypassing the search
@@ -443,7 +443,7 @@ summary() {
 grants_to() { # <FILE>
   [ -x "$c_sqlite3" ] || err 00020 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
   if ! "$c_sqlite3" -readonly -separator "$TAB" "$TCC_DB" \
-       "select service, client_type, client, auth_value, datetime(last_modified,'unixepoch') from access where service in ('$SERVICE', '$SERVICE_ES') order by client;" \
+       "select service, client_type, client, auth_value, datetime(last_modified,'unixepoch','localtime') from access where service in ('$SERVICE', '$SERVICE_ES') order by client;" \
        > "$WORK/rows" 2> "$WORK/rows.err"; then
     _e=$(cat "$WORK/rows.err")
     case "$_e" in
@@ -1391,6 +1391,12 @@ t_add_already_granted_opens_nothing() {
   if [ ! -e "$T_DIR/stub/open.log" ] && case "$_o" in *"already granted"*) true ;; *) false ;; esac
   then t_pass; else t_fail "'$_o'"; fi
 }
+t_list_dates_are_local_time() {
+  t_grant 1 "$T_DIR/bin/tool"                       # last_modified 1790000000
+  _want=$(TZ=Pacific/Kiritimati date -r 1790000000 '+%Y-%m-%d %H:%M:%S')   # UTC+14: never the UTC date
+  _o=$(TZ=Pacific/Kiritimati VRB=1 cmd_list 2>&1)
+  case "$_o" in *"$_want"*) t_pass ;; *) t_fail "want '$_want' in '$_o'" ;; esac
+}
 t_add_finds_a_grant_under_its_real_path() {
   ln -s "$T_DIR/bin" "$T_DIR/linked"
   t_grant 1 "$T_DIR/bin/tool"                       # macOS records the REAL path
@@ -1584,6 +1590,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_add_opens_the_pane_and_shows_the_file t_add_already_granted_opens_nothing \
                 t_add_makes_its_own_launcher_readable t_add_refuses_a_file_others_cannot_read \
                 t_add_finds_a_grant_under_its_real_path t_add_through_a_link_shows_the_real_file \
+                t_list_dates_are_local_time \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \
                 t_launcher_is_readable_and_run_by_root_only \
                 t_as_root_open_runs_in_the_screen_users_session \
