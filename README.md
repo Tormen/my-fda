@@ -57,6 +57,10 @@ any other selection goes through the pipe `list` is made for:
 
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.
+- **A path is granted as its real path:** macOS records the file with its
+  symlinks resolved, so `add` resolves PATH first and says so when it
+  differs (`/LINKS/local/sbin/x is /Users/.../local/sbin/x`); `list` shows
+  that real path, which is what to `grep` for.
 - **Changes** start with a backup (`sqlite3 .backup` into `BACKUP_DIR`,
   never `cp` -- tccd holds the file open). Each grant then goes the one way
   the machine allows: an app id through `tccutil`, macOS's own command,

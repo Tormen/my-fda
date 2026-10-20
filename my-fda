@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="b5dcb62"
+SCRIPT_COMMIT="e2e9edb"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -54,6 +54,17 @@ self_path() {
     case "$_l" in /*) _p="$_l" ;; *) _p="${_p%/*}/$_l" ;; esac
   done
   printf '%s\n' "$_p"
+}
+# PATH as macOS records it in a grant: its own links and its directories
+# followed -- /LINKS/local/sbin/x is granted as /Users/.../local/sbin/x
+real_path() { # <PATH>
+  _rp=$1
+  while [ -L "$_rp" ]; do
+    _rl=$(readlink "$_rp")
+    case "$_rl" in /*) _rp="$_rl" ;; *) _rp="${_rp%/*}/$_rl" ;; esac
+  done
+  _rd=$(cd "${_rp%/*}" 2>/dev/null && pwd -P) || { printf '%s\n' "$1"; return 0; }
+  printf '%s\n' "$_rd/${_rp##*/}"
 }
 self_dir() { _sd=$(self_path); _sd=$(cd "${_sd%/*}" 2>/dev/null && pwd -P) && printf '%s\n' "$_sd"; }
 
@@ -674,6 +685,11 @@ cmd_add() { # <PATH>
   _p=$1
   case "$_p" in /*) ;; *) _p="$(pwd)/$_p" ;; esac
   [ -e "$_p" ] || err 00034 "'$_p' does not exist"
+  _r=$(real_path "$_p")
+  if [ "$_r" != "$_p" ]; then
+    msg "    > $_p is $_r -- macOS records the grant under that path"
+    _p=$_r
+  fi
   for _cel in $BREW_CELLARS; do
     case "$_p" in "$_cel"/*)
       warn "    > a Homebrew version path: this grant breaks on the next upgrade -- a launcher lasts: $US create <NAME> <stable path>" ;;
@@ -1375,6 +1391,21 @@ t_add_already_granted_opens_nothing() {
   if [ ! -e "$T_DIR/stub/open.log" ] && case "$_o" in *"already granted"*) true ;; *) false ;; esac
   then t_pass; else t_fail "'$_o'"; fi
 }
+t_add_finds_a_grant_under_its_real_path() {
+  ln -s "$T_DIR/bin" "$T_DIR/linked"
+  t_grant 1 "$T_DIR/bin/tool"                       # macOS records the REAL path
+  _o=$(cmd_add "$T_DIR/linked/tool" < /dev/null 2>&1)
+  if [ ! -e "$T_DIR/stub/open.log" ] && case "$_o" in *"already granted"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "'$_o'"; fi
+}
+t_add_through_a_link_shows_the_real_file() {
+  ln -s "$T_DIR/bin" "$T_DIR/linked"
+  _o=$(cmd_add "$T_DIR/linked/tool" < /dev/null 2>&1)
+  _log=$(tr '\n' '|' < "$T_DIR/stub/open.log" 2>/dev/null)
+  if [ "$_log" = "x-test-pane|-R $T_DIR/bin/tool|" ] \
+     && case "$_o" in *"$T_DIR/linked/tool is $T_DIR/bin/tool"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "open got '$_log', '$_o'"; fi
+}
 t_add_makes_its_own_launcher_readable() {
   printf 'x\n' > "$HELPER_DIR/my-fda.job"; chmod 300 "$HELPER_DIR/my-fda.job"   # unreadable for the screen's user (here: its owner)
   _o=$(cmd_add "$HELPER_DIR/my-fda.job" < /dev/null 2>&1)
@@ -1552,6 +1583,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
                 t_add_opens_the_pane_and_shows_the_file t_add_already_granted_opens_nothing \
                 t_add_makes_its_own_launcher_readable t_add_refuses_a_file_others_cannot_read \
+                t_add_finds_a_grant_under_its_real_path t_add_through_a_link_shows_the_real_file \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \
                 t_launcher_is_readable_and_run_by_root_only \
                 t_as_root_open_runs_in_the_screen_users_session \
