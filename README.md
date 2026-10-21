@@ -34,6 +34,12 @@ grant.
 - The target is compiled in (`MY-FDA-TARGET=<path>`), never taken from the
   command line; `status` reads it back out of the binary.
 - `create` never rebuilds an existing launcher: a rebuild loses its grant.
+- `create --user <USER>`: for a job that runs as a user. launchd starts the
+  launcher as root (its LaunchDaemon names no `UserName`), and the launcher
+  becomes USER -- groups, group, user, HOME/USER/LOGNAME/SHELL -- before it
+  starts the target; when it cannot, the target does not run at all. The
+  user is compiled in too (`MY-FDA-USER=<user>`), and `test` refuses a
+  LaunchDaemon that would start such a launcher as anyone but root.
 
 ## Commands
 
@@ -43,7 +49,7 @@ grant.
     my-fda remove go <ID>...          ...and takes it away
     my-fda cleanup [go]               the GONE grants: shows them; with go, takes them away
     my-fda reset [go]                 all grants at once, and what to give back
-    my-fda create <NAME> <TARGET>     build and install a launcher
+    my-fda create <NAME> <TARGET>     build and install a launcher (--user <USER>: the target runs as USER)
     my-fda destroy [go] <NAME>        delete a launcher and its grant
     my-fda status [<NAME>]            each launcher, its target, its grant, the daemon using it
     my-fda test <NAME>                start that daemon through launchd
