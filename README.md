@@ -19,8 +19,12 @@ LaunchDaemon starts the launcher; macOS counts the program launchd started
 as responsible for everything it runs, so the target gets the launcher's
 grant.
 
-- A launcher is `/Library/PrivilegedHelperTools/my-fda.<NAME>`, root:wheel
-  744, and reads as `my-fda.<NAME>` in the Full Disk Access list. Readable by
+- A launcher is `/Library/PrivilegedHelperTools/my-fda-<NAME>`, root:wheel
+  744, and reads as `my-fda-<NAME>` in the Full Disk Access list. No dot in
+  the name: macOS takes what follows a dot for an extension and files the
+  launcher as a Document, which the pane refuses -- dragged in or chosen with
+  +. A launcher from before, `my-fda.<NAME>`, still runs its job; `status`
+  marks it, and `add` refuses it with the fix (destroy, create). Readable by
   everyone, because System Settings, which runs as the screen's user, reads
   the file to add it (a file only root can read is refused there without a
   word); run by root only, because the grant is that path's. `add` makes an
