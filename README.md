@@ -41,10 +41,16 @@ grant.
   user is compiled in too (`MY-FDA-USER=<user>`), and `test` refuses a
   LaunchDaemon that would start such a launcher as anyone but root.
 
+- `add` puts the program into the Full Disk Access list switched OFF -- a
+  row in TCC.db with auth 0 and the program's code requirement, TCC.db
+  backed up first -- and opens the pane: one click there grants it, so the
+  grant stays a person's act. Where TCC.db cannot be written, it shows the
+  program in Finder to drag in instead.
+
 ## Commands
 
     my-fda list                       every grant: an ID, the client, allowed/denied, what to do
-    my-fda add <PATH>                 "+": opens the pane, shows PATH in Finder to drag in, checks it
+    my-fda add <PATH>                 "+": lists PATH switched OFF, opens the pane -- you switch it on -- checks it
     my-fda remove <ID>...             "-": shows what it would take away
     my-fda remove go <ID>...          ...and takes it away
     my-fda cleanup [go]               the GONE grants: shows them; with go, takes them away
