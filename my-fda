@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="1eda2a1"
+SCRIPT_COMMIT="1eab732"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -170,7 +170,8 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
   add <PATH>    "+": puts PATH into the Full Disk Access list switched OFF
                 and opens the pane -- macOS grants only on a click, so you
                 switch it on there -- then checks that it is on. Where
-                TCC.db cannot be written: shows PATH in Finder to drag in
+                TCC.db cannot be written: shows PATH in Finder to drag in. An app
+                (.app) is granted under its bundle id, as the pane does
   remove [go] [<ID>...]
                 "-": shows the grants it would take away; with go, takes them
                 away. IDs as arguments, or one per line on stdin (the first
@@ -680,14 +681,21 @@ sqlite_delete() { # <FILE>
 # requirement (codesign's designated requirement, compiled by csreq) where
 # the schema has a csreq column, TCC.db backed up first and tccd restarted
 # after. Fails, and changes nothing, where TCC.db cannot be written.
-list_off() { # <PATH>
+# An app bundle's id -- macOS records an app's grant under it, not under
+# the path; empty for anything that is not an app bundle.
+bundle_id() { # <PATH>
+  [ -f "$1/Contents/Info.plist" ] || return 0
+  "$c_plutil" -extract CFBundleIdentifier raw -o - "$1/Contents/Info.plist" 2>/dev/null
+}
+
+list_off() { # <PATH> <client type> <client>
   tcc_writable || return 1
   backup_tcc
   PHASE="listing $1 switched off -- TCC.db backup: $BACKUP_FILE"
   "$c_sqlite3" -readonly "$TCC_DB" "select name from pragma_table_info('access');" > "$WORK/cols" \
     || err 00032 "cannot read the columns of $TCC_DB's access table -- nothing was changed"
   _cols="service, client, client_type, auth_value"
-  _vals="'$SERVICE', '$(sql_q "$1")', 1, 0"
+  _vals="'$SERVICE', '$(sql_q "$3")', $2, 0"
   for _cv in "auth_reason:3" "auth_version:1" "flags:0" "last_modified:CAST(strftime('%s','now') AS INTEGER)"; do
     grep -qx "${_cv%%:*}" "$WORK/cols" && { _cols="$_cols, ${_cv%%:*}"; _vals="$_vals, ${_cv#*:}"; }
   done
@@ -745,10 +753,15 @@ cmd_add() { # <PATH>
       warn "    > a Homebrew version path: this grant breaks on the next upgrade -- a launcher lasts: $US create <NAME> <stable path>" ;;
     esac
   done
+  _add_t=1; _add_c=$_p; _b=$(bundle_id "$_p")
+  if [ -n "$_b" ]; then
+    _add_t=0; _add_c=$_b
+    msg "    > $_p is the app $_b -- macOS records the grant under that id"
+  fi
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/every"
   ours < "$WORK/every" > "$WORK/all"
-  awk -F '\t' -v c="$_p" '$2 == "1" && $3 == c' "$WORK/all" > "$WORK/row"
+  awk -F '\t' -v t="$_add_t" -v c="$_add_c" '$2 == t && $3 == c' "$WORK/all" > "$WORK/row"
   _listed=0
   if [ -s "$WORK/row" ]; then
     case "$(cut -f 4 "$WORK/row")" in
@@ -769,7 +782,7 @@ cmd_add() { # <PATH>
       *) err 00039 "'$_p' is not readable by the screen's user ($SCREEN_USER) -- System Settings runs as that user and cannot add it: chmod a+r '$_p' first" ;;
     esac
   fi
-  if [ "$_listed" = "0" ] && list_off "$_p"; then
+  if [ "$_listed" = "0" ] && list_off "$_p" "$_add_t" "$_add_c"; then
     _listed=1
     msg "    > $_p put into the list, switched OFF [TCC.db backup: $BACKUP_FILE]"
   fi
@@ -786,8 +799,8 @@ cmd_add() { # <PATH>
     printf '    > press Return when it is ON: '
     read -r _x < /dev/tty
     grants_to "$WORK/all"
-    awk -F '\t' -v c="$_p" '$2 == "1" && $3 == c && $4 == "allowed[2]"' "$WORK/all" > "$WORK/row"
-    [ -s "$WORK/row" ] || err 00042 "'$_p' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- switch it on (or drag it in), then $US list"
+    awk -F '\t' -v t="$_add_t" -v c="$_add_c" '$2 == t && $3 == c && $4 == "allowed[2]"' "$WORK/all" > "$WORK/row"
+    [ -s "$WORK/row" ] || err 00042 "'$_add_c' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- switch it on (or drag it in), then $US list"
     msg "granted:"; render < "$WORK/row" | sed 's/^/    /'
   else
     say "--> then check: $US list"
@@ -1699,6 +1712,26 @@ t_add_through_a_link_shows_the_real_file() {
      && case "$_o" in *"$T_DIR/linked/tool is $T_DIR/bin/tool"*) true ;; *) false ;; esac
   then t_pass; else t_fail "open got '$_log', '$_o'"; fi
 }
+# An app bundle, as System Settings records it: under its bundle id.
+t_app() { # <name> <bundle id>
+  mkdir "$T_DIR/$1.app" "$T_DIR/$1.app/Contents"; chmod 755 "$T_DIR/$1.app" "$T_DIR/$1.app/Contents"
+  printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict>' \
+    "<key>CFBundleIdentifier</key><string>$2</string>" '</dict></plist>' > "$T_DIR/$1.app/Contents/Info.plist"
+}
+# The ada case: switched on in the pane, recorded under the app's id -- a
+# look for the PATH says "not allowed yet" for a grant that is there.
+t_add_an_app_finds_its_grant_by_bundle_id() {
+  t_app Foo com.test.foo; t_grant 0 com.test.foo 2
+  _o=$(cmd_add "$T_DIR/Foo.app" < /dev/null 2>&1)
+  if [ ! -e "$T_DIR/stub/open.log" ] && case "$_o" in *"already granted"*com.test.foo*) true ;; *) false ;; esac
+  then t_pass; else t_fail "'$_o'"; fi
+}
+t_add_lists_an_app_off_under_its_bundle_id() {
+  t_app Foo com.test.foo
+  cmd_add "$T_DIR/Foo.app" < /dev/null > /dev/null 2>&1
+  _r=$("$c_sqlite3" "$TCC_DB" "select client_type || ' ' || client || ' ' || auth_value from access where service='$SERVICE';")
+  if [ "$_r" = "0 com.test.foo 0" ]; then t_pass; else t_fail "rows '$_r'"; fi
+}
 t_add_lists_it_off_and_opens_only_the_pane() {
   _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
   _a=$("$c_sqlite3" "$TCC_DB" "select auth_value from access where client='$T_DIR/bin/tool' and client_type=1 and service='$SERVICE';")
@@ -1956,6 +1989,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_cleanup_with_nothing_gone_is_nothing_to_do \
                 t_reset_go_takes_all_and_saves_the_list t_reset_without_go_changes_nothing \
                 t_add_opens_the_pane_and_shows_the_file t_add_already_granted_opens_nothing \
+                t_add_an_app_finds_its_grant_by_bundle_id t_add_lists_an_app_off_under_its_bundle_id \
                 t_add_lists_it_off_and_opens_only_the_pane t_add_falls_back_to_the_drag_where_tcc_is_read_only \
                 t_listed_off_row_carries_the_code_requirement \
                 t_add_makes_its_own_launcher_readable t_add_refuses_a_file_others_cannot_read \
