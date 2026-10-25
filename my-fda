@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="11bb358"
+SCRIPT_COMMIT="1eda2a1"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -160,6 +160,13 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 An app id is GONE only when neither Spotlight nor
                 LaunchServices knows it (Spotlight misses helpers inside
                 other apps); Apple's own app ids are never called GONE.
+  denied [<LAST>]
+                every program macOS refused Full Disk Access, from the
+                system log of the last LAST (30m, 2h, 3d or boot; default
+                DENIED_LAST_DEFAULT, 1d), one line each: the program as a
+                grant names it, denied[0] with the raw value, how often,
+                when last (-V: first), the binary that touched the file
+                (via), and what to do
   add <PATH>    "+": puts PATH into the Full Disk Access list switched OFF
                 and opens the pane -- macOS grants only on a click, so you
                 switch it on there -- then checks that it is on. Where
@@ -265,6 +272,10 @@ c_tccutil="/usr/bin/tccutil"
 c_osascript="/usr/bin/osascript"
 c_codesign="/usr/bin/codesign"
 c_csreq="/usr/bin/csreq"
+c_log="/usr/bin/log"
+
+# How far back denied reads the system log when given no window.
+DENIED_LAST_DEFAULT="1d"
 
 # Full Disk Access given by configuration profiles (MDM) -- listed, never
 # shown in System Settings.
@@ -273,7 +284,7 @@ _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log DENIED_LAST_DEFAULT"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -885,6 +896,104 @@ cmd_reset() { # [go]
   done < "$WORK/back"
 }
 
+############################################################## refusals
+
+# tccd logs each check in lines that share its msgID: AUTHREQ_CTX (the
+# service), AUTHREQ_SUBJECT (the client, as a grant names it),
+# AUTHREQ_ATTRIBUTION (the binary that touched the file) and AUTHREQ_RESULT
+# (authValue). A msgID is unique only within one tccd process, and the lines
+# of checks in flight interleave: they are joined by tccd pid + msgID, never
+# by order.
+TCCD_PREDICATE='process == "tccd" AND (eventMessage BEGINSWITH "AUTHREQ_CTX" OR eventMessage BEGINSWITH "AUTHREQ_SUBJECT" OR eventMessage BEGINSWITH "AUTHREQ_ATTRIBUTION" OR eventMessage BEGINSWITH "AUTHREQ_RESULT")'
+
+# `log show --style compact` lines on stdin -> one line per Full Disk Access
+# check that was not allowed: date time<TAB>client<TAB>authValue<TAB>via.
+refusals() {
+  awk -v svc="$SERVICE" '
+    function key(   p, m) {
+      p = $4; sub(/^tccd\[/, "", p); sub(/:.*/, "", p)
+      m = $0; sub(/.*msgID=/, "", m); sub(/,.*/, "", m)
+      return p ":" m
+    }
+    function field(name, from,   i) {   # the value of name= in from, up to the next , or }
+      i = index(from, name "=")
+      if (i == 0) return ""
+      from = substr(from, i + length(name) + 1); sub(/[,}].*/, "", from)
+      return from
+    }
+    $6 == "AUTHREQ_CTX:"         { s[key()] = field("service", $0) }
+    $6 == "AUTHREQ_SUBJECT:"     { c[key()] = field("subject", $0) }
+    $6 == "AUTHREQ_ATTRIBUTION:" { i = index($0, "accessing={"); if (i) v[key()] = field("binary_path", substr($0, i)) }
+    $6 == "AUTHREQ_RESULT:"      {
+      k = key(); r = field("authValue", $0)
+      if (s[k] == svc && r != "2")
+        printf "%s %s\t%s\t%s\t%s\n", $1, substr($2, 1, 8), (c[k] == "" ? "?" : c[k]), r, (v[k] == "" ? "-" : v[k])
+      delete s[k]; delete c[k]; delete v[k]
+    }'
+}
+
+# Refusals on stdin, the grants in <FILE> -> one line per client and value:
+# the client first, the value raw, how often, when last (-V: first), the
+# binary that touched the file, and what to do.
+render_refusals() { # <grants FILE>
+  awk -F '\t' -v vrb="$VRB" -v shells="$SHELLS" -v cellars="$BREW_CELLARS" -v us="$US" '
+    FILENAME == ARGV[1] { g[$3] = $4; next }
+    { k = $2 SUBSEP $3
+      if (!(k in n)) { o[++rows] = k; first[k] = $1; cl[k] = $2; av[k] = $3 }
+      n[k]++; last[k] = $1
+      if (index("," via[k] ",", "," $4 ",") == 0) via[k] = (via[k] == "" ? $4 : via[k] "," $4) }
+    END {
+      ns = split(shells, sh, " "); nc = split(cellars, ce, " ")
+      for (i = 1; i <= rows; i++) {
+        k = o[i]; c = cl[k]; note = ""
+        for (j = 1; j <= ns; j++) if (c == sh[j]) note = "a shell: give the job its own launcher -> " us " create"
+        for (j = 1; j <= nc; j++) if (index(c, ce[j] "/") == 1) note = "Homebrew version path: give the job a launcher -> " us " create"
+        if (note != "") ;
+        else if (g[c] == "allowed[2]") note = "granted, still refused: the grant no longer matches the binary -> " us " remove it, then add"
+        else if (g[c] == "denied[0]") note = "switched OFF in the pane -> switch it on there, if it should have it"
+        else if (c ~ /^\//) note = "no grant -> " us " add " c
+        else note = "no grant (an app) -> System Settings > Full Disk Access, +"
+        st[i] = (av[k] == "0" ? "denied[0]" : "other[" av[k] "]")
+        cnt[i] = n[k] "x"; nt[i] = note
+        if (length(c) > w) w = length(c)
+        if (length(cnt[i]) > wn) wn = length(cnt[i])
+        if (length(via[k]) > wv) wv = length(via[k])
+      }
+      for (i = 1; i <= rows; i++) {
+        k = o[i]
+        l = sprintf("%-" w "s  %s  %" wn "s  ", cl[k], st[i], cnt[i])
+        if (vrb == "1") l = l "first " first[k] "  "
+        print l sprintf("last %s  via %-" wv "s  %s", last[k], via[k], nt[i])
+      }
+    }' "$1" -
+}
+
+cmd_denied() { # [LAST]
+  [ $# -le 1 ] || err 00053 "usage: $US denied [<LAST>]"
+  _last="${1:-$DENIED_LAST_DEFAULT}"
+  case "$_last" in
+    boot) ;;
+    ""|[!0-9]*|*[!0-9mhd]*|*[mhd]?*) err 00054 "LAST='$_last': a number with m, h or d (30m, 2h, 3d), or boot -- what log show --last takes" ;;
+  esac
+  [ -x "$c_log" ] || err 00055 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
+  PHASE="reading the system log -- nothing was changed"
+  msg " >>> tccd's checks in the system log of the last $_last -- a long window takes a while"
+  run "$c_log" show --style compact --last "$_last" --predicate "$TCCD_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
+    || err 00056 "log show failed: $(cat "$WORK/log.err")"
+  _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ } END { print n+0 }' "$WORK/log")
+  refusals < "$WORK/log" > "$WORK/refused"
+  if [ ! -s "$WORK/refused" ]; then
+    msg "no Full Disk Access refused in the last $_last [tccd checks read: $_r]"
+    return 0
+  fi
+  grants_to "$WORK/every"
+  ours < "$WORK/every" > "$WORK/all"
+  render_refusals "$WORK/all" < "$WORK/refused"
+  [ "$QUIET" = "1" ] || awk -F '\t' -v last="$_last" -v r="$_r" '
+    { rows++; if (!($2 in c)) { c[$2]; progs++ } }
+    END { printf "%d refused check(s) from %d program(s) in the last %s [tccd checks read: %d]\n", rows, progs, last, r }' "$WORK/refused"
+}
+
 ############################################################## launchers
 
 # The launcher program. `create` compiles it with the target (and the name,
@@ -948,7 +1057,7 @@ static int become_user(void) {
             }
         }
     }
-    fprintf(stderr, "ERROR 00053 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_USER
+    fprintf(stderr, "ERROR 00057 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_USER
             " (%s: %s) -- its LaunchDaemon must start it as root\n", step, errno ? strerror(errno) : "no such user");
     return 0;
 }
@@ -974,7 +1083,7 @@ int main(int argc, char **argv) {
 
     rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
     if (rc != 0) {
-        fprintf(stderr, "ERROR 00054 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
+        fprintf(stderr, "ERROR 00058 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
                 MY_FDA_TARGET, strerror(rc));
         return 70;
     }
@@ -982,7 +1091,7 @@ int main(int argc, char **argv) {
 
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
-            fprintf(stderr, "ERROR 00055 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            fprintf(stderr, "ERROR 00059 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
             return 70;
         }
     }
@@ -1011,7 +1120,7 @@ launcher_path() { # <NAME>
 
 check_name() { # <NAME>
   case "$1" in
-    ""|*[!A-Za-z0-9._-]*) err 00056 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+    ""|*[!A-Za-z0-9._-]*) err 00060 "name '$1': letters, digits, '.', '_' and '-' only" ;;
   esac
 }
 
@@ -1029,49 +1138,49 @@ daemons_to() { # <FILE>
 }
 
 cmd_create() { # <NAME> <TARGET>
-  [ $# -eq 2 ] || err 00057 "usage: $US create <NAME> <TARGET>"
+  [ $# -eq 2 ] || err 00061 "usage: $US create <NAME> <TARGET>"
   check_name "$1"
   _t=$2
   _l=$(launcher_path "$1")
-  case "$_t" in /*) ;; *) err 00058 "target '$_t' must be an absolute path" ;; esac
-  case "$_t" in *\"*|*\\*) err 00059 "target '$_t': no '\"' or '\\' in the path" ;; esac
-  [ -f "$_t" ] && [ -x "$_t" ] || err 00060 "target '$_t' is not an executable file"
+  case "$_t" in /*) ;; *) err 00062 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00063 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00064 "target '$_t' is not an executable file"
   for _cel in $BREW_CELLARS; do
     case "$_t" in "$_cel"/*)
-      err 00061 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+      err 00065 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
     esac
   done
   for _sh in $SHELLS; do
-    [ "$_t" = "$_sh" ] && err 00062 "target '$_t' is a shell: every script it runs would get full disk access"
+    [ "$_t" = "$_sh" ] && err 00066 "target '$_t' is a shell: every script it runs would get full disk access"
   done
   if [ -n "$USER_ARG" ]; then
-    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00063 "--user '$USER_ARG': not a user name" ;; esac
-    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00064 "--user '$USER_ARG': no such user on this machine"
-    [ "$_uid" != "0" ] || err 00065 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
+    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00067 "--user '$USER_ARG': not a user name" ;; esac
+    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00068 "--user '$USER_ARG': no such user on this machine"
+    [ "$_uid" != "0" ] || err 00069 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
   fi
-  [ -e "$_l" ] && err 00066 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  [ -e "$_l" ] && err 00070 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00067 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00071 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00068 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00072 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
   run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00069 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00073 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00070 "the built launcher does not carry its target marker -- not installed"
+    || err 00074 "the built launcher does not carry its target marker -- not installed"
   [ "$(user_of "$WORK/launcher")" = "$USER_ARG" ] \
-    || err 00071 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
+    || err 00075 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
   # 744: readable by everyone -- System Settings, which runs as the screen's
   # user, reads the file to add it -- run by root only: the grant is this
   # path's, and nobody else can execute it
   if [ "$(id -u)" = "0" ]; then run install -m 744 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 744 "$WORK/launcher" "$_l"; fi || err 00072 "cannot install '$_l'"
+  else run install -m 744 "$WORK/launcher" "$_l"; fi || err 00076 "cannot install '$_l'"
   msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG} [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it${USER_ARG:+ (and no UserName in it)}, and $US test $1"
 }
@@ -1082,12 +1191,12 @@ launcher_of() { # <NAME>
   _lo=$(launcher_path "$1")
   # a launcher from before 2026-10-22, named with a dot, still runs its job
   [ -e "$_lo" ] || [ ! -e "$HELPER_DIR/my-fda.$1" ] || _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00073 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00077 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00074 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00078 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -1132,21 +1241,21 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00075 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00079 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00076 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00077 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00080 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00081 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   _as=$(user_of "$_l")
   if [ -n "$_as" ] && _un=$("$c_plutil" -extract UserName raw -o - "$_pl" 2>/dev/null); then
-    err 00078 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
+    err 00082 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
   fi
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00079 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00083 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -1158,7 +1267,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00080 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00084 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -1175,7 +1284,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00081 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00085 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
@@ -1239,6 +1348,10 @@ t_world() {
   chmod 755 "$T_DIR/stub/osascript"
   c_osascript="$T_DIR/stub/osascript"
   MDM_OVERRIDES="$T_DIR/MDMOverrides.plist"
+  # log logs what it gets and prints the tccd lines a test wrote
+  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/log.log'" "cat '$T_DIR/tccd.log' 2>/dev/null" 'exit 0' > "$T_DIR/stub/log"
+  chmod 755 "$T_DIR/stub/log"
+  c_log="$T_DIR/stub/log"; DENIED_LAST_DEFAULT="1d"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
   # shellcheck disable=SC2329  # called through need_root
   is_root() { true; }
@@ -1518,6 +1631,58 @@ t_list_dates_are_local_time() {
   _o=$(TZ=Pacific/Kiritimati VRB=1 cmd_list 2>&1)
   case "$_o" in *"$_want"*) t_pass ;; *) t_fail "want '$_want' in '$_o'" ;; esac
 }
+# One tccd check, its lines as `log show --style compact` prints them.
+t_check() { # <tccd pid> <msgID> <service> <subject> <accessing binary> <authValue> [<time>]
+  _p="2026-10-25 ${7:-10:01:30}.083 Df tccd[$1:428a401] [com.apple.TCC:access]"
+  printf '%s\n' \
+    "$_p AUTHREQ_CTX: msgID=$2, function=TCCAccessRequest, service=$3, preflight=yes, query=1, client_dict=(null), daemon_dict=<private>" \
+    "$_p AUTHREQ_ATTRIBUTION: msgID=$2, attribution={responsible={TCCDProcess: identifier=com.apple.dash, pid=45618, auid=0, euid=0, responsible_path=$4, binary_path=$4}, accessing={TCCDProcess: identifier=x, pid=45749, auid=0, euid=0, binary_path=$5}, requesting={TCCDProcess: identifier=com.apple.sandboxd, pid=186, auid=0, euid=0, binary_path=/usr/libexec/sandboxd}, }," \
+    "$_p AUTHREQ_SUBJECT: msgID=$2, subject=$4," \
+    "$_p AUTHREQ_RESULT: msgID=$2, authValue=$6, authReason=5, authVersion=1, desired_auth=0, error=(null),"
+}
+t_denied_names_the_program_how_often_and_via() {
+  { t_check 191 186.1 "$SERVICE" /bin/sh /usr/sbin/diskutil 0 10:00:24
+    t_check 191 186.2 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2
+    t_check 191 186.3 "$SERVICE" /bin/sh /usr/sbin/diskutil 0 10:06:58; } > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *sshd*) t_fail "an allowed check is listed: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/sh  denied[0]  2x  last 2026-10-25 10:06:58  via /usr/sbin/diskutil  a shell"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+}
+# Lines of two checks interleaved, with the SAME msgID from two tccd
+# processes: joined by order or by msgID alone, the denial is pinned on the
+# allowed program.
+t_denied_joins_checks_by_tccd_and_msgid_not_by_order() {
+  t_check 191 186.7 "$SERVICE" /bin/sh /usr/sbin/diskutil 0 > "$T_DIR/a"
+  t_check 512 186.7 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2 > "$T_DIR/b"
+  t_check 191 186.8 kTCCServiceSystemPolicyRemovableVolumes /bin/zsh /usr/sbin/diskutil 0 > "$T_DIR/c"
+  paste -d '\n' "$T_DIR/a" "$T_DIR/b" "$T_DIR/c" > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *sshd*|*zsh*) t_fail "pinned on the wrong check: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/sh  denied[0]  1x"*"via /usr/sbin/diskutil"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+}
+t_denied_says_what_to_do_from_the_grant() {
+  t_grant 1 "$T_DIR/bin/tool" 2
+  { t_check 191 1.1 "$SERVICE" "$T_DIR/bin/tool" "$T_DIR/bin/tool" 0
+    t_check 191 1.2 "$SERVICE" "$T_DIR/bin/my tool" "$T_DIR/bin/my tool" 0
+    t_check 191 1.3 "$SERVICE" "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" /bin/ls 0; } > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"$T_DIR/bin/tool "*"granted, still refused"*) ;; *) t_fail "granted: '$_o'"; return ;; esac
+  case "$_o" in *"no grant -> my-fda add $T_DIR/bin/my tool"*) ;; *) t_fail "no grant: '$_o'"; return ;; esac
+  case "$_o" in *"rsync "*"Homebrew version path"*) t_pass ;; *) t_fail "cellar: '$_o'" ;; esac
+}
+t_denied_none_says_so_with_the_count() {
+  t_check 191 1.1 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2 > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  if [ "$_o" = " >>> tccd's checks in the system log of the last 1d -- a long window takes a while
+no Full Disk Access refused in the last 1d [tccd checks read: 1]" ]; then t_pass; else t_fail "got '$_o'"; fi
+}
+t_denied_passes_the_window_and_refuses_a_bad_one() {
+  cmd_denied 2h > /dev/null 2>&1
+  _l=$(cat "$T_DIR/stub/log.log")
+  case "$_l" in *"--last 2h "*) ;; *) t_fail "log got '$_l'"; return ;; esac
+  _o=$( (cmd_denied 2hh) 2>&1); _rc=$?
+  case "$_rc|$_o" in 1"|ERROR "*"LAST='2hh'"*) t_pass ;; *) t_fail "rc $_rc '$_o'" ;; esac
+}
 t_add_finds_a_grant_under_its_real_path() {
   ln -s "$T_DIR/bin" "$T_DIR/linked"
   t_grant 1 "$T_DIR/bin/tool"                       # macOS records the REAL path
@@ -1757,7 +1922,7 @@ t_dashed_verb_and_rm_name_the_verb() {
 }
 t_help_names_every_verb() {
   _h=$(usage); _bad=""
-  for _v in list add remove cleanup reset create destroy status test; do
+  for _v in list denied add remove cleanup reset create destroy status test; do
     case "$_h" in *"
   $_v "*) ;; *) _bad="$_bad $_v" ;; esac
   done
@@ -1796,6 +1961,9 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_add_makes_its_own_launcher_readable t_add_refuses_a_file_others_cannot_read \
                 t_add_finds_a_grant_under_its_real_path t_add_through_a_link_shows_the_real_file \
                 t_list_dates_are_local_time \
+                t_denied_names_the_program_how_often_and_via t_denied_joins_checks_by_tccd_and_msgid_not_by_order \
+                t_denied_says_what_to_do_from_the_grant t_denied_none_says_so_with_the_count \
+                t_denied_passes_the_window_and_refuses_a_bad_one \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \
                 t_launcher_is_readable_and_run_by_root_only \
                 t_as_root_open_runs_in_the_screen_users_session \
@@ -1840,16 +2008,16 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00082 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00086 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
-    --user)           [ "$_n" -ge 1 ] || err 00083 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --user)           [ "$_n" -ge 1 ] || err 00087 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --user=*)         USER_ARG="${_a#--user=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
-    --list|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00084 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00085 "unknown option '$_a' (--help)" ;;
+    --list|--denied|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
+                      err 00088 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00089 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -1857,21 +2025,22 @@ done
 
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
-  list|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00086 "no such command; you mean \`$US remove\`" ;;
+  list|denied|add|remove|cleanup|reset|create|destroy|status|test) ;;
+  rm)  err 00090 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00087 "unknown command '$CMD' (--help)" ;;
+  *)   err 00091 "unknown command '$CMD' (--help)" ;;
 esac
-[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00088 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00092 "--user goes with create -- the user a new launcher runs its target as"
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00089 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00093 "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 
 case "$CMD" in
   list)    cmd_list "$@" ;;
+  denied)  cmd_denied "$@" ;;
   add)     cmd_add "$@" ;;
   remove)  cmd_remove "$@" ;;
   cleanup) cmd_cleanup "$@" ;;

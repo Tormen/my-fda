@@ -54,6 +54,7 @@ grant.
 ## Commands
 
     my-fda list                       every grant: an ID, the client, allowed/denied, what to do
+    my-fda denied [<LAST>]            every program refused Full Disk Access in the system log (default: the last 1d)
     my-fda add <PATH>                 "+": lists PATH switched OFF, opens the pane -- you switch it on -- checks it
     my-fda remove <ID>...             "-": shows what it would take away
     my-fda remove go <ID>...          ...and takes it away
@@ -71,6 +72,12 @@ any other selection goes through the pipe `list` is made for:
     my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove        # shows
     my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove go     # acts
 
+- **denied** finds the jobs that need a grant or a launcher: a job refused
+  Full Disk Access just fails, often with a misleading error, and only
+  tccd's lines in the system log say so. One line per program, as a grant
+  names it, with how often, when last, the binary that touched the file
+  (`via`), and what to do -- `/bin/dash ... via /usr/sbin/diskutil  a
+  shell` is a root shell script running diskutil, and needs a launcher.
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.
 - **A path is granted as its real path:** macOS records the file with its
