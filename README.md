@@ -31,7 +31,9 @@ grant.
   older 700 launcher readable first, and refuses any other file the screen's
   user cannot read, saying why.
 - `create` builds it on the machine with its own `cc` (Command Line Tools);
-  the C source lives inside `my-fda`, never a binary in git.
+  the C source lives inside `my-fda`, never a binary in git. It then signs it
+  ad hoc as `my-fda-<NAME>` (`codesign -s -`): `cc` alone only linker-signs,
+  and the pane loses such a file when it is dragged in.
 - It spawns the target and waits, so the process holding the grant lives for
   the whole run; it passes on all arguments and SIGTERM/SIGINT/SIGHUP, and
   exits with the target's status.

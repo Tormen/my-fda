@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="703d330"
+SCRIPT_COMMIT="0116f43"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -1222,11 +1222,17 @@ cmd_create() { # [NAME] <TARGET>
     || err 00075 "the built launcher does not carry its target marker -- not installed"
   [ "$(user_of "$WORK/launcher")" = "$USER_ARG" ] \
     || err 00076 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
+  # cc only linker-signs, under the temp file's name: the Full Disk Access
+  # pane takes such a file with + but loses it when dragged in (ada,
+  # 2026-10-26). A real ad-hoc signature under its own name, as my-tm signs
+  # my-tm-launcher, is dragged in like any other program.
+  run "$c_codesign" -s - -f -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
+    || err 00077 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
   # 744: readable by everyone -- System Settings, which runs as the screen's
   # user, reads the file to add it -- run by root only: the grant is this
   # path's, and nobody else can execute it
   if [ "$(id -u)" = "0" ]; then run install -m 744 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 744 "$WORK/launcher" "$_l"; fi || err 00077 "cannot install '$_l'"
+  else run install -m 744 "$WORK/launcher" "$_l"; fi || err 00078 "cannot install '$_l'"
   msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG} [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it${USER_ARG:+ (and no UserName in it)}, and $US test $1"
 }
@@ -1237,12 +1243,12 @@ launcher_of() { # <NAME>
   _lo=$(launcher_path "$1")
   # a launcher from before 2026-10-22, named with a dot, still runs its job
   [ -e "$_lo" ] || [ ! -e "$HELPER_DIR/my-fda.$1" ] || _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00078 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00079 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00079 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00080 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -1287,21 +1293,21 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00080 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00081 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00081 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00082 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00082 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00083 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   _as=$(user_of "$_l")
   if [ -n "$_as" ] && _un=$("$c_plutil" -extract UserName raw -o - "$_pl" 2>/dev/null); then
-    err 00083 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
+    err 00084 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
   fi
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00084 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00085 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -1313,7 +1319,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00085 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00086 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -1330,7 +1336,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00086 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00087 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
@@ -1943,6 +1949,14 @@ t_create_takes_its_name_from_the_target() {
      && case "$_o" in *"NAME my-job, from the target"*) true ;; *) false ;; esac
   then t_pass; else t_fail "made: $(cd "$HELPER_DIR" && printf '%s ' *) -- '$_o'"; fi
 }
+t_launcher_is_signed_under_its_own_name() {
+  { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
+  printf '#!/bin/sh\n' > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
+  cmd_create job "$T_DIR/bin/job" > /dev/null 2>&1
+  _s=$("$c_codesign" -dv "$HELPER_DIR/my-fda-job" 2>&1)
+  case "$_s" in *linker-signed*) t_fail "only linker-signed: '$_s'"; return ;; esac
+  case "$_s" in *"Identifier=my-fda-job"*"Signature=adhoc"*) t_pass ;; *) t_fail "got '$_s'" ;; esac
+}
 t_new_launcher_has_no_dot_in_its_name() {
   { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
   printf '#!/bin/sh\n' > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
@@ -2077,7 +2091,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_status_and_test_know_a_user_launcher \
                 t_status_shows_target_grant_and_daemon t_test_kickstarts_the_one_daemon \
                 t_old_dotted_launcher_still_runs_its_job_and_is_flagged t_new_launcher_has_no_dot_in_its_name \
-                t_create_takes_its_name_from_the_target \
+                t_create_takes_its_name_from_the_target t_launcher_is_signed_under_its_own_name \
                 t_test_refuses_unused_and_ambiguous t_destroy_shows_then_go_deletes_launcher_and_grant \
                 t_list_refuses_without_root t_old_config_takes_new_keys_from_the_defaults \
                 t_config_setting_a_key_empty_names_it \
@@ -2114,16 +2128,16 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00087 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00088 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
-    --user)           [ "$_n" -ge 1 ] || err 00088 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --user)           [ "$_n" -ge 1 ] || err 00089 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --user=*)         USER_ARG="${_a#--user=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
     --list|--denied|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00089 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00090 "unknown option '$_a' (--help)" ;;
+                      err 00090 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00091 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -2132,15 +2146,15 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|denied|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00091 "no such command; you mean \`$US remove\`" ;;
+  rm)  err 00092 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00092 "unknown command '$CMD' (--help)" ;;
+  *)   err 00093 "unknown command '$CMD' (--help)" ;;
 esac
-[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00093 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00094 "--user goes with create -- the user a new launcher runs its target as"
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00094 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00095 "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 
