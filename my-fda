@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="69c1540"
+SCRIPT_COMMIT="703d330"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -170,7 +170,8 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
   add <PATH>    "+": puts PATH into the Full Disk Access list switched OFF
                 and opens the pane -- macOS grants only on a click, so you
                 switch it on there -- then checks that it is on. Where
-                TCC.db cannot be written: shows PATH in Finder to drag in. An app
+                TCC.db cannot be written: shows PATH in Finder and puts it
+                on the clipboard, for +, Cmd-Shift-G, Cmd-V. An app
                 (.app) is granted under its bundle id, as the pane does
   remove [go] [<ID>...]
                 "-": shows the grants it would take away; with go, takes them
@@ -266,6 +267,7 @@ c_sqlite3="/usr/bin/sqlite3"
 c_md5="/sbin/md5"
 c_mdfind="/usr/bin/mdfind"
 c_open="/usr/bin/open"
+c_pbcopy="/usr/bin/pbcopy"
 c_killall="/usr/bin/killall"
 c_launchctl="/bin/launchctl"
 c_plutil="/usr/bin/plutil"
@@ -287,7 +289,7 @@ _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log DENIED_LAST_DEFAULT"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log DENIED_LAST_DEFAULT c_pbcopy"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -604,16 +606,19 @@ take_away() { # <FILE>
 # "Domain does not support specified action", macado 2026-10-04), so as root
 # it runs inside the session of the user at the screen: the owner of
 # /dev/console.
-gui_open() { # <open args...>
+# Run a command in the session of the user at the screen -- where the pane,
+# Finder and the clipboard are; as root, in its own session otherwise.
+as_screen_user() { # <command...>
   if is_root; then
     _cu=$(/bin/ls -ln /dev/console 2>/dev/null | awk '{ print $3 }')
     case "$_cu" in
       ""|0|*[!0-9]*) ;;
-      *) run "$c_launchctl" asuser "$_cu" "$c_open" "$@"; return ;;
+      *) run "$c_launchctl" asuser "$_cu" "$@"; return ;;
     esac
   fi
-  run "$c_open" "$@"
+  run "$@"
 }
+gui_open() { as_screen_user "$c_open" "$@"; }   # <open args...>
 
 # Where TCC.db cannot be written: open the pane, name exactly what to take
 # away with "-", and wait for it when someone is at the keyboard.
@@ -794,7 +799,14 @@ cmd_add() { # <PATH>
   else
     gui_open -R "$_p" || err 00041 "could not show '$_p' in Finder"
     say " >>> Full Disk Access is open, and $_p is selected in Finder (TCC.db cannot be written here):"
-    say "    > drag it into the list (or: +, then Cmd-Shift-G, paste the path)"
+    # A drag can be lost: the pane asks for the password and drops the item
+    # (ada, macOS 27, 2026-10-26) -- + then the path never is.
+    if printf '%s' "$_p" | as_screen_user "$c_pbcopy" > /dev/null 2>&1; then
+      say "    > +, then Cmd-Shift-G, Cmd-V, Return -- the path is on the clipboard"
+    else
+      say "    > +, then Cmd-Shift-G, paste the path, Return"
+    fi
+    say "    > (a drag into the list can be lost behind the password prompt)"
   fi
   if [ -t 0 ] && [ -r /dev/tty ]; then
     PHASE="waiting for the grant to be switched on"
@@ -802,7 +814,7 @@ cmd_add() { # <PATH>
     read -r _x < /dev/tty
     grants_to "$WORK/all"
     awk -F '\t' -v t="$_add_t" -v c="$_add_c" '$2 == t && $3 == c && $4 == "allowed[2]"' "$WORK/all" > "$WORK/row"
-    [ -s "$WORK/row" ] || err 00042 "'$_add_c' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- switch it on (or drag it in), then $US list"
+    [ -s "$WORK/row" ] || err 00042 "'$_add_c' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- add it with + and switch it on, then $US list"
     msg "granted:"; render < "$WORK/row" | sed 's/^/    /'
   else
     say "--> then check: $US list"
@@ -1372,6 +1384,8 @@ t_world() {
     "exec /usr/bin/sqlite3 '$T_DIR/TCC.db' \"delete from access where service='$SERVICE' and client_type=0 and client='\$3';\"" \
     > "$T_DIR/stub/tccutil"
   chmod 755 "$T_DIR/stub/"*
+  printf '%s\n' '#!/bin/sh' "cat > '$T_DIR/stub/clipboard'" > "$T_DIR/stub/pbcopy"; chmod 755 "$T_DIR/stub/pbcopy"
+  c_pbcopy="$T_DIR/stub/pbcopy"
   c_mdfind="$T_DIR/stub/mdfind"; c_open="$T_DIR/stub/open"; c_launchctl="$T_DIR/stub/launchctl"
   c_tccutil="$T_DIR/stub/tccutil"
   # LaunchServices knows a nested helper Spotlight does not index.
@@ -1651,6 +1665,7 @@ t_as_root_open_runs_in_the_screen_users_session() {
   _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
   _lc=$(tr '\n' '|' < "$T_DIR/stub/launchctl.log" 2>/dev/null)
   _want="asuser $_cu $T_DIR/stub/open x-test-pane|asuser $_cu $T_DIR/stub/open -R $T_DIR/bin/tool|"
+  _want="${_want}asuser $_cu $c_pbcopy|"   # the clipboard is the screen user's too
   if [ "$_lc" = "$_want" ]; then t_pass; else t_fail "launchctl got '$_lc', want '$_want', '$_o'"; fi
 }
 t_add_already_granted_opens_nothing() {
@@ -1777,8 +1792,22 @@ t_add_falls_back_to_the_drag_where_tcc_is_read_only() {
   _n=$(t_count)
   _log=$(tr '\n' '|' < "$T_DIR/stub/open.log" 2>/dev/null)
   if [ "$_n" = "0" ] && [ "$_log" = "x-test-pane|-R $T_DIR/bin/tool|" ] \
-     && case "$_o" in *"drag it into the list"*) true ;; *) false ;; esac
+     && case "$_o" in *"+, then Cmd-Shift-G, Cmd-V, Return -- the path is on the clipboard"*) true ;; *) false ;; esac
   then t_pass; else t_fail "rows $_n, open '$_log', '$_o'"; fi
+}
+# The clipboard is the screen user's: as root, pbcopy goes through launchctl asuser.
+t_add_puts_the_path_on_the_screen_users_clipboard() {
+  chmod 444 "$TCC_DB"
+  cmd_add "$T_DIR/bin/tool" < /dev/null > /dev/null 2>&1
+  _c=$(cat "$T_DIR/stub/clipboard" 2>/dev/null); _l=$(cat "$T_DIR/stub/launchctl.log" 2>/dev/null)
+  if [ "$_c" = "$T_DIR/bin/tool" ] && case "$_l" in *"asuser "*" $c_pbcopy"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "clipboard '$_c', launchctl '$_l'"; fi
+}
+# A failed copy must not be announced as done.
+t_add_claims_no_clipboard_when_the_copy_fails() {
+  chmod 444 "$TCC_DB"; c_pbcopy=/usr/bin/false
+  _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
+  case "$_o" in *clipboard*) t_fail "claims it: '$_o'" ;; *"paste the path, Return"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
 }
 t_listed_off_row_carries_the_code_requirement() {
   { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
@@ -2032,6 +2061,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_add_opens_the_pane_and_shows_the_file t_add_already_granted_opens_nothing \
                 t_add_an_app_finds_its_grant_by_bundle_id t_add_lists_an_app_off_under_its_bundle_id \
                 t_add_lists_it_off_and_opens_only_the_pane t_add_falls_back_to_the_drag_where_tcc_is_read_only \
+                t_add_puts_the_path_on_the_screen_users_clipboard t_add_claims_no_clipboard_when_the_copy_fails \
                 t_listed_off_row_carries_the_code_requirement \
                 t_add_makes_its_own_launcher_readable t_add_refuses_a_file_others_cannot_read \
                 t_add_finds_a_grant_under_its_real_path t_add_through_a_link_shows_the_real_file \
