@@ -8,13 +8,14 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="0f5af6e"
+SCRIPT_COMMIT="f8d706a"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
 QUIET=0; VRB=0
 CONFIG_ARG=""
 USER_ARG=""          # create --user: the user the launcher runs its target as
+GROUP_ARG=""         # create --group: that user's primary group instead of their own
 LAUNCHER_UID=0       # the only uid a launcher runs under: root (the tests set their own)
 TAB=$(printf '\t')
 SERVICE="kTCCServiceSystemPolicyAllFiles"
@@ -201,7 +202,7 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
 
 LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda-<NAME>, root:wheel 755,
   run only as root
-  create [<NAME>] <TARGET> [--user <USER>]
+  create [<NAME>] <TARGET> [--user <USER> [--group <GROUP>]]
                 build a launcher that runs TARGET (a script, or a Homebrew
                 binary by its stable path such as /opt/homebrew/bin/rsync)
                 with all its arguments; needs the Command Line Tools (cc).
@@ -211,6 +212,9 @@ LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda-<NAME>, root:wheel 755,
                 --user: TARGET runs as USER -- launchd starts the launcher as
                 root (its LaunchDaemon names no UserName) and it drops to
                 USER first; without it, TARGET runs as root.
+                --group (with --user): GROUP is the primary group instead
+                of USER's own -- what a LaunchDaemon's GroupName did; USER's
+                other groups stay.
   destroy [go] <NAME>
                 shows the launcher, its target, its grant and the daemon(s)
                 using it; with go, deletes the launcher and its grant
@@ -293,6 +297,7 @@ c_tccutil="/usr/bin/tccutil"
 c_osascript="/usr/bin/osascript"
 c_codesign="/usr/bin/codesign"
 c_csreq="/usr/bin/csreq"
+c_dscl="/usr/bin/dscl"
 c_log="/usr/bin/log"
 
 # How far back denied reads the system log when given no window.
@@ -305,7 +310,7 @@ _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS BREW_TREES GENERAL_TOOLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log DENIED_LAST_DEFAULT c_pbcopy"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log DENIED_LAST_DEFAULT c_pbcopy c_dscl"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -1117,21 +1122,39 @@ __attribute__((used)) static const char marker[] = "MY-FDA-TARGET=" MY_FDA_TARGE
 
 #ifdef MY_FDA_USER
 __attribute__((used)) static const char user_marker[] = "MY-FDA-USER=" MY_FDA_USER;
+#ifdef MY_FDA_GROUP
+__attribute__((used)) static const char group_marker[] = "MY-FDA-GROUP=" MY_FDA_GROUP;
+#define MY_FDA_AS MY_FDA_USER ":" MY_FDA_GROUP
+#else
+#define MY_FDA_AS MY_FDA_USER
+#endif
 
 /* Become MY_FDA_USER for good -- groups, group, user, and the variables a
  * login gives -- or say why not; the target never runs as anyone else. */
 static int become_user(void) {
     struct passwd *pw = getpwnam(MY_FDA_USER);
     const char *step = "getpwnam";
-    if (pw != NULL) {
+    gid_t gid = 0;
+    int found = pw != NULL;
+    if (found) gid = pw->pw_gid;
+#ifdef MY_FDA_GROUP
+    if (found) {                 /* --group: this primary group, not the user's own */
+        struct group *gr = getgrnam(MY_FDA_GROUP);
+        step = "getgrnam";
+        found = gr != NULL;
+        if (found) gid = gr->gr_gid;
+    }
+#endif
+    if (found) {
         step = "initgroups";
-        if (initgroups(pw->pw_name, (int)pw->pw_gid) == 0) {
+        if (initgroups(pw->pw_name, (int)gid) == 0) {
             step = "setgid";
-            if (setgid(pw->pw_gid) == 0) {
+            if (setgid(gid) == 0) {
                 step = "setuid";
                 if (setuid(pw->pw_uid) == 0) {
                     step = "check";
-                    if (setuid(0) != 0 && getuid() == pw->pw_uid && geteuid() == pw->pw_uid) {
+                    if (setuid(0) != 0 && getuid() == pw->pw_uid && geteuid() == pw->pw_uid
+                        && getgid() == gid && getegid() == gid) {
                         setenv("HOME", pw->pw_dir, 1);
                         setenv("USER", pw->pw_name, 1);
                         setenv("LOGNAME", pw->pw_name, 1);
@@ -1142,8 +1165,8 @@ static int become_user(void) {
             }
         }
     }
-    fprintf(stderr, "ERROR 00058 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_USER
-            " (%s: %s) -- its LaunchDaemon must start it as root\n", step, errno ? strerror(errno) : "no such user");
+    fprintf(stderr, "ERROR 00058 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_AS
+            " (%s: %s) -- its LaunchDaemon must start it as root\n", step, errno ? strerror(errno) : "no such user or group");
     return 0;
 }
 #endif
@@ -1199,6 +1222,9 @@ marker_of() { # <launcher>
 # The user a launcher runs its target as; empty: root.
 user_of() { # <launcher>
   LC_ALL=C grep -a -o 'MY-FDA-USER=[[:print:]]*' "$1" 2>/dev/null | head -n 1 | sed 's/^MY-FDA-USER=//'
+}
+group_of() { # <launcher>
+  LC_ALL=C grep -a -o 'MY-FDA-GROUP=[[:print:]]*' "$1" 2>/dev/null | head -n 1 | sed 's/^MY-FDA-GROUP=//'
 }
 
 # Where launcher <NAME> lives. No dot in its name: macOS takes what follows a
@@ -1261,36 +1287,44 @@ cmd_create() { # [NAME] <TARGET>
     _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00071 "--user '$USER_ARG': no such user on this machine"
     [ "$_uid" != "0" ] || err 00072 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
   fi
-  [ -e "$_l" ] && err 00073 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  if [ -n "$GROUP_ARG" ]; then
+    [ -n "$USER_ARG" ] || err 00073 "--group goes with --user: it is the primary group the launcher takes when it becomes that user"
+    case "$GROUP_ARG" in (*[!A-Za-z0-9._-]*) err 00074 "--group '$GROUP_ARG': not a group name" ;; esac
+    "$c_dscl" . -read "/Groups/$GROUP_ARG" PrimaryGroupID > /dev/null 2>&1 \
+      || err 00075 "--group '$GROUP_ARG': no such group on this machine"
+  fi
+  [ -e "$_l" ] && err 00076 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00074 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00077 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00075 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00078 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
-  run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" "-DMY_FDA_RUN_UID=$LAUNCHER_UID" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} \
+  run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" "-DMY_FDA_RUN_UID=$LAUNCHER_UID" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} ${GROUP_ARG:+"-DMY_FDA_GROUP=\"$GROUP_ARG\""} \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00076 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00079 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00077 "the built launcher does not carry its target marker -- not installed"
+    || err 00080 "the built launcher does not carry its target marker -- not installed"
   [ "$(user_of "$WORK/launcher")" = "$USER_ARG" ] \
-    || err 00078 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
+    || err 00081 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
+  [ "$(group_of "$WORK/launcher")" = "$GROUP_ARG" ] \
+    || err 00082 "the built launcher does not carry its group marker ($GROUP_ARG) -- not installed"
   # cc only linker-signs, under the temp file's name: the Full Disk Access
   # pane takes such a file with + but loses it when dragged in (ada,
   # 2026-10-26). A real ad-hoc signature under its own name, as my-tm signs
   # my-tm-launcher, is dragged in like any other program.
   run "$c_codesign" -s - -f -o runtime -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
-    || err 00079 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
+    || err 00083 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
   # 755: System Settings, running as the screen's user, loses a dragged-in
   # program that user cannot execute (ada, 2026-10-26); the launcher itself
   # refuses to run as anyone but root, so executing it grants nothing
   if [ "$(id -u)" = "0" ]; then run install -m 755 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00080 "cannot install '$_l'"
-  msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG} [marker ok]"
+  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00084 "cannot install '$_l'"
+  msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG${GROUP_ARG:+:$GROUP_ARG}} [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it${USER_ARG:+ (and no UserName in it)}, and $US test $1"
 }
 
@@ -1300,12 +1334,12 @@ launcher_of() { # <NAME>
   _lo=$(launcher_path "$1")
   # a launcher from before 2026-10-22, named with a dot, still runs its job
   [ -e "$_lo" ] || [ ! -e "$HELPER_DIR/my-fda.$1" ] || _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00081 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00085 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00082 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00086 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -1324,10 +1358,10 @@ cmd_status() { # [NAME]
   : > "$WORK/status"
   while IFS= read -r _l; do
     _nm=${_l##*/my-fda[.-]}
-    _t=$(marker_of "$_l"); _tn=""; _as=$(user_of "$_l")
+    _t=$(marker_of "$_l"); _tn=""; _as=$(user_of "$_l"); _ag=$(group_of "$_l")
     if [ -z "$_t" ]; then _t="?"; _tn="no target marker: not built by $US"
     elif [ ! -e "$_t" ]; then _tn="target GONE -> recreate it, or $US destroy $_nm"; fi
-    [ -n "$_as" ] && _t="$_t (as $_as)"
+    [ -n "$_as" ] && _t="$_t (as $_as${_ag:+:$_ag})"
     case "$_l" in */my-fda.*) _tn="${_tn:+$_tn; }old name (a dot): the pane cannot add it -> rebuild as my-fda-$_nm" ;; esac
     _g=$(awk -F '\t' -v c="$_l" '$2 == "1" && $3 == c { print $1 " " $4 }' "$WORK/all")
     if [ -z "$_g" ]; then _g="none"; _gn="no grant -> $US add $_l"; else _gn=""; fi
@@ -1350,21 +1384,21 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00083 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00087 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00084 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00085 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00088 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00089 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   _as=$(user_of "$_l")
   if [ -n "$_as" ] && _un=$("$c_plutil" -extract UserName raw -o - "$_pl" 2>/dev/null); then
-    err 00086 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
+    err 00090 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
   fi
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00087 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00091 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -1376,7 +1410,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00088 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00092 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -1393,7 +1427,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00089 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00093 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
@@ -1427,6 +1461,7 @@ t_world() {
   eval "$(default_config | grep '^GENERAL_TOOLS=')"   # the shipped list, from its one owner
   c_sqlite3=/usr/bin/sqlite3; c_md5=/sbin/md5; c_plutil=/usr/bin/plutil
   c_cc=/usr/bin/cc; c_xcode_select=/usr/bin/xcode-select; c_codesign=/usr/bin/codesign; c_csreq=/usr/bin/csreq
+  c_dscl=/usr/bin/dscl; GROUP_ARG=""
   c_killall=/usr/bin/true
   # Spotlight knows Finder and one app; open and launchctl log what they get.
   # shellcheck disable=SC2016  # the stubs expand $1 when THEY run
@@ -1991,6 +2026,29 @@ t_create_user_refuses_what_it_must() {
   case "$_o" in *"--user goes with create"*) ;; *) _bad="$_bad '$_o'" ;; esac
   if [ -z "$_bad" ] && [ ! -e "$HELPER_DIR/my-fda-job" ]; then t_pass; else t_fail "accepted:$_bad"; fi
 }
+t_create_group_refuses_what_it_must() {
+  printf '#!/bin/sh\n' > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
+  _bad=""
+  ( GROUP_ARG=staff; cmd_create job "$T_DIR/bin/job" ) > /dev/null 2>&1 && _bad="$_bad without-user"
+  ( USER_ARG=nobody; GROUP_ARG="no-such-group-x9"; cmd_create job "$T_DIR/bin/job" ) > /dev/null 2>&1 && _bad="$_bad unknown"
+  ( USER_ARG=nobody; GROUP_ARG="a b"; cmd_create job "$T_DIR/bin/job" ) > /dev/null 2>&1 && _bad="$_bad name"
+  _o=$("$(self_path)" --group staff list 2>&1) && _bad="$_bad --group-with-list"
+  case "$_o" in *"--group goes with create"*) ;; *) _bad="$_bad '$_o'" ;; esac
+  if [ -z "$_bad" ] && [ ! -e "$HELPER_DIR/my-fda-job" ]; then t_pass; else t_fail "accepted:$_bad"; fi
+}
+# Built with --group it carries its group, and -- not root here -- refuses to
+# run its target at all, naming user AND group.
+t_group_launcher_carries_its_group_and_never_runs_as_anyone_else() {
+  { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- run as root, it would really switch"; t_pass; return; }
+  printf '%s\n' '#!/bin/sh' "id > '$T_DIR/ran'" > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
+  _o=$( (USER_ARG=nobody; GROUP_ARG=staff; cmd_create job "$T_DIR/bin/job") 2>&1)
+  _e=$("$HELPER_DIR/my-fda-job" 2>&1); _rc=$?
+  if [ "$_rc" = "70" ] && [ ! -e "$T_DIR/ran" ] && [ "$(group_of "$HELPER_DIR/my-fda-job")" = staff ] \
+     && case "$_e" in *"cannot run as nobody:staff"*) true ;; *) false ;; esac \
+     && case "$_o" in *"as nobody:staff [marker ok]"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "rc $_rc, group '$(group_of "$HELPER_DIR/my-fda-job")', '$_e', '$_o'"; fi
+}
 t_user_launcher_never_runs_its_target_as_anyone_else() {
   { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
   [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- run as root, it would really switch"; t_pass; return; }
@@ -2002,8 +2060,14 @@ t_user_launcher_never_runs_its_target_as_anyone_else() {
      && case "$_e" in *"cannot run as nobody"*"must start it as root"*) true ;; *) false ;; esac
   then t_pass; else t_fail "rc $_rc, ran '$(cat "$T_DIR/ran" 2>/dev/null)', '$_e', '$_o'"; fi
 }
-t_fake_user_launcher() { # <name> <target> <user>
+t_fake_user_launcher() { # <name> <target> <user> [<group>]
   printf 'junk\000MY-FDA-TARGET=%s\000MY-FDA-USER=%s\000junk\n' "$2" "$3" > "$HELPER_DIR/my-fda-$1"
+  [ -z "${4:-}" ] || printf 'MY-FDA-GROUP=%s\000\n' "$4" >> "$HELPER_DIR/my-fda-$1"
+}
+t_status_shows_a_launchers_group() {
+  t_fake_user_launcher job "$T_DIR/bin/tool" me media
+  _s=$(cmd_status 2>&1 | grep '^job ')
+  case "$_s" in *"$T_DIR/bin/tool (as me:media)"*) t_pass ;; *) t_fail "status '$_s'" ;; esac
 }
 t_status_and_test_know_a_user_launcher() {
   t_fake_user_launcher job "$T_DIR/bin/tool" me; t_daemon_plist org.test.job "$HELPER_DIR/my-fda-job"
@@ -2207,6 +2271,8 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_as_root_open_runs_in_the_screen_users_session \
                 t_create_refuses_what_it_must t_launcher_passes_args_status_and_carries_its_target \
                 t_create_user_refuses_what_it_must t_user_launcher_never_runs_its_target_as_anyone_else \
+                t_create_group_refuses_what_it_must t_group_launcher_carries_its_group_and_never_runs_as_anyone_else \
+                t_status_shows_a_launchers_group \
                 t_status_and_test_know_a_user_launcher \
                 t_status_shows_target_grant_and_daemon t_test_kickstarts_the_one_daemon \
                 t_old_dotted_launcher_still_runs_its_job_and_is_flagged t_new_launcher_has_no_dot_in_its_name \
@@ -2248,16 +2314,18 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00090 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00094 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
-    --user)           [ "$_n" -ge 1 ] || err 00091 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --user)           [ "$_n" -ge 1 ] || err 00095 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --user=*)         USER_ARG="${_a#--user=}" ;;
+    --group)          [ "$_n" -ge 1 ] || err 00096 "--group needs a group name"; GROUP_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --group=*)        GROUP_ARG="${_a#--group=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
     --list|--denied|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00092 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00093 "unknown option '$_a' (--help)" ;;
+                      err 00097 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00098 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -2266,15 +2334,16 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|denied|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00094 "no such command; you mean \`$US remove\`" ;;
+  rm)  err 00099 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00095 "unknown command '$CMD' (--help)" ;;
+  *)   err 00100 "unknown command '$CMD' (--help)" ;;
 esac
-[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00096 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00101 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00102 "--group goes with create -- with --user, the primary group a new launcher takes"
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00097 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00103 "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 

@@ -75,7 +75,7 @@ grant.
     my-fda remove go <ID>...          ...and takes it away
     my-fda cleanup [go]               the GONE grants: shows them; with go, takes them away
     my-fda reset [go]                 all grants at once, and what to give back
-    my-fda create [<NAME>] <TARGET>   build and install a launcher; NAME defaults to the target's file name (--user <USER>: the target runs as USER)
+    my-fda create [<NAME>] <TARGET>   build and install a launcher; NAME defaults to the target's file name (--user <USER>: the target runs as USER; --group <GROUP>: with that primary group)
     my-fda destroy [go] <NAME>        delete a launcher and its grant
     my-fda status [<NAME>]            each launcher, its target, its grant, the daemon using it
     my-fda test <NAME>                start that daemon through launchd
