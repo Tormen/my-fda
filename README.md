@@ -20,16 +20,19 @@ as responsible for everything it runs, so the target gets the launcher's
 grant.
 
 - A launcher is `/Library/PrivilegedHelperTools/my-fda-<NAME>`, root:wheel
-  744, and reads as `my-fda-<NAME>` in the Full Disk Access list. No dot in
+  755, and reads as `my-fda-<NAME>` in the Full Disk Access list. No dot in
   the name: macOS takes what follows a dot for an extension and files the
   launcher as a Document, which the pane refuses -- dragged in or chosen with
   +. A launcher from before, `my-fda.<NAME>`, still runs its job; `status`
-  marks it, and `add` refuses it with the fix (destroy, create). Readable by
-  everyone, because System Settings, which runs as the screen's user, reads
-  the file to add it (a file only root can read is refused there without a
-  word); run by root only, because the grant is that path's. `add` makes an
-  older 700 launcher readable first, and refuses any other file the screen's
-  user cannot read, saying why.
+  marks it, and `add` refuses it with the fix (destroy, create). Executable
+  by everyone, because System Settings, which runs as the screen's user,
+  loses a dragged-in program that user cannot execute, without a word; yet
+  run by root only, because the grant is that path's: the launcher refuses
+  any other uid (ERROR, exit 77) before it starts the target, and is signed
+  with the hardened runtime, so no `DYLD_` variable puts code into it before
+  that check. A launcher from before is 744: `+` adds it, a drag does not.
+  `add` makes an older 700 launcher readable first, and refuses any other
+  file the screen's user cannot read, saying why.
 - `create` builds it on the machine with its own `cc` (Command Line Tools);
   the C source lives inside `my-fda`, never a binary in git. It then signs it
   ad hoc as `my-fda-<NAME>` (`codesign -s -`): `cc` alone only linker-signs,

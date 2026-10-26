@@ -8,13 +8,14 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="0116f43"
+SCRIPT_COMMIT="f226926"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
 QUIET=0; VRB=0
 CONFIG_ARG=""
 USER_ARG=""          # create --user: the user the launcher runs its target as
+LAUNCHER_UID=0       # the only uid a launcher runs under: root (the tests set their own)
 TAB=$(printf '\t')
 SERVICE="kTCCServiceSystemPolicyAllFiles"
 # An Endpoint Security system extension's Full Disk Access is kept under this
@@ -193,7 +194,8 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 own: every grant at once. Extension and profile grants are
                 never taken away by my-fda.
 
-LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda-<NAME>, root:wheel 744
+LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda-<NAME>, root:wheel 755,
+  run only as root
   create [<NAME>] <TARGET> [--user <USER>]
                 build a launcher that runs TARGET (a script, or a Homebrew
                 binary by its stable path such as /opt/homebrew/bin/rsync)
@@ -1045,6 +1047,11 @@ launcher_c() {
  * passes on all arguments, exits with the target's status, and passes on
  * SIGTERM/SIGINT/SIGHUP. Built with --user, it first becomes that user, so
  * the target runs as the user while the grant stays this launcher's.
+ *
+ * Everyone may execute it -- the Full Disk Access pane loses a dragged-in
+ * program its user cannot -- so it refuses to run unless started as root:
+ * its LaunchDaemon. Signed with the hardened runtime, no DYLD_ variable can
+ * put code into it before this check.
  */
 #include <errno.h>
 #include <grp.h>
@@ -1059,6 +1066,9 @@ launcher_c() {
 
 #if !defined(MY_FDA_TARGET) || !defined(MY_FDA_NAME)
 #error "build with -DMY_FDA_TARGET='\"/path\"' -DMY_FDA_NAME='\"name\"'"
+#endif
+#ifndef MY_FDA_RUN_UID
+#define MY_FDA_RUN_UID 0
 #endif
 
 __attribute__((used)) static const char marker[] = "MY-FDA-TARGET=" MY_FDA_TARGET;
@@ -1106,6 +1116,11 @@ int main(int argc, char **argv) {
     int rc, st;
 
     (void)argc;
+    if (getuid() != MY_FDA_RUN_UID) {
+        fprintf(stderr, "ERROR 00058 [77]: my-fda-" MY_FDA_NAME ": runs only as root, started by its"
+                " LaunchDaemon -- not as uid %d\n", (int)getuid());
+        return 77;
+    }
     argv[0] = (char *)MY_FDA_TARGET;
     signal(SIGTERM, forward);
     signal(SIGINT, forward);
@@ -1116,7 +1131,7 @@ int main(int argc, char **argv) {
 
     rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
     if (rc != 0) {
-        fprintf(stderr, "ERROR 00058 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
+        fprintf(stderr, "ERROR 00059 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
                 MY_FDA_TARGET, strerror(rc));
         return 70;
     }
@@ -1124,7 +1139,7 @@ int main(int argc, char **argv) {
 
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
-            fprintf(stderr, "ERROR 00059 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            fprintf(stderr, "ERROR 00060 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
             return 70;
         }
     }
@@ -1153,7 +1168,7 @@ launcher_path() { # <NAME>
 
 check_name() { # <NAME>
   case "$1" in
-    ""|*[!A-Za-z0-9._-]*) err 00060 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+    ""|*[!A-Za-z0-9._-]*) err 00061 "name '$1': letters, digits, '.', '_' and '-' only" ;;
   esac
 }
 
@@ -1182,57 +1197,57 @@ cmd_create() { # [NAME] <TARGET>
     1) set -- "$(name_of "$1")" "$1"
        msg "    > NAME $1, from the target's file name -- $US create <NAME> <TARGET> chooses another" ;;
     2) ;;
-    *) err 00061 "usage: $US create [<NAME>] <TARGET>" ;;
+    *) err 00062 "usage: $US create [<NAME>] <TARGET>" ;;
   esac
   check_name "$1"
-  case "$1" in *.*) err 00062 "name '$1': no '.' -- my-fda-$1 would look like a document, and the pane cannot add it" ;; esac
+  case "$1" in *.*) err 00063 "name '$1': no '.' -- my-fda-$1 would look like a document, and the pane cannot add it" ;; esac
   _t=$2
   _l=$(launcher_path "$1")
-  case "$_t" in /*) ;; *) err 00063 "target '$_t' must be an absolute path" ;; esac
-  case "$_t" in *\"*|*\\*) err 00064 "target '$_t': no '\"' or '\\' in the path" ;; esac
-  [ -f "$_t" ] && [ -x "$_t" ] || err 00065 "target '$_t' is not an executable file"
+  case "$_t" in /*) ;; *) err 00064 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00065 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00066 "target '$_t' is not an executable file"
   for _cel in $BREW_CELLARS; do
     case "$_t" in "$_cel"/*)
-      err 00066 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+      err 00067 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
     esac
   done
   for _sh in $SHELLS; do
-    [ "$_t" = "$_sh" ] && err 00067 "target '$_t' is a shell: every script it runs would get full disk access"
+    [ "$_t" = "$_sh" ] && err 00068 "target '$_t' is a shell: every script it runs would get full disk access"
   done
   if [ -n "$USER_ARG" ]; then
-    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00068 "--user '$USER_ARG': not a user name" ;; esac
-    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00069 "--user '$USER_ARG': no such user on this machine"
-    [ "$_uid" != "0" ] || err 00070 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
+    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00069 "--user '$USER_ARG': not a user name" ;; esac
+    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00070 "--user '$USER_ARG': no such user on this machine"
+    [ "$_uid" != "0" ] || err 00071 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
   fi
-  [ -e "$_l" ] && err 00071 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  [ -e "$_l" ] && err 00072 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00072 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00073 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00073 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00074 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
-  run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} \
+  run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" "-DMY_FDA_RUN_UID=$LAUNCHER_UID" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00074 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00075 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00075 "the built launcher does not carry its target marker -- not installed"
+    || err 00076 "the built launcher does not carry its target marker -- not installed"
   [ "$(user_of "$WORK/launcher")" = "$USER_ARG" ] \
-    || err 00076 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
+    || err 00077 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
   # cc only linker-signs, under the temp file's name: the Full Disk Access
   # pane takes such a file with + but loses it when dragged in (ada,
   # 2026-10-26). A real ad-hoc signature under its own name, as my-tm signs
   # my-tm-launcher, is dragged in like any other program.
-  run "$c_codesign" -s - -f -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
-    || err 00077 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
-  # 744: readable by everyone -- System Settings, which runs as the screen's
-  # user, reads the file to add it -- run by root only: the grant is this
-  # path's, and nobody else can execute it
-  if [ "$(id -u)" = "0" ]; then run install -m 744 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 744 "$WORK/launcher" "$_l"; fi || err 00078 "cannot install '$_l'"
+  run "$c_codesign" -s - -f -o runtime -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
+    || err 00078 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
+  # 755: System Settings, running as the screen's user, loses a dragged-in
+  # program that user cannot execute (ada, 2026-10-26); the launcher itself
+  # refuses to run as anyone but root, so executing it grants nothing
+  if [ "$(id -u)" = "0" ]; then run install -m 755 -o root -g wheel "$WORK/launcher" "$_l"
+  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00079 "cannot install '$_l'"
   msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG} [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it${USER_ARG:+ (and no UserName in it)}, and $US test $1"
 }
@@ -1243,12 +1258,12 @@ launcher_of() { # <NAME>
   _lo=$(launcher_path "$1")
   # a launcher from before 2026-10-22, named with a dot, still runs its job
   [ -e "$_lo" ] || [ ! -e "$HELPER_DIR/my-fda.$1" ] || _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00079 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00080 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00080 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00081 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -1293,21 +1308,21 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00081 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00082 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00082 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00083 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00083 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00084 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   _as=$(user_of "$_l")
   if [ -n "$_as" ] && _un=$("$c_plutil" -extract UserName raw -o - "$_pl" 2>/dev/null); then
-    err 00084 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
+    err 00085 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
   fi
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00085 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00086 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -1319,7 +1334,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00086 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00087 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -1336,7 +1351,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00087 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00088 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
@@ -1410,6 +1425,7 @@ t_world() {
   # shellcheck disable=SC2329  # called through need_root
   is_root() { true; }
   VRB=0; QUIET=0; BACKUP_STAMP=""
+  LAUNCHER_UID=$(id -u)   # the launchers built here run for the tester
 }
 t_grant() { # <type> <client> [auth] [service] -- quotes on its own, never through sql_q, which is under test
   "$c_sqlite3" "$TCC_DB" "insert into access (service, client, client_type, auth_value, last_modified) values ('${4:-$SERVICE}', '$(printf '%s' "$2" | sed "s/'/''/g")', $1, ${3:-2}, 1790000000);"
@@ -1857,7 +1873,18 @@ t_launcher_is_readable_and_run_by_root_only() {
   cmd_create job "$T_DIR/bin/job" > /dev/null 2>&1
   # shellcheck disable=SC2012  # only the MODE column is read
   _m=$(ls -l "$HELPER_DIR/my-fda-job" | cut -c1-10)
-  if [ "$_m" = "-rwxr--r--" ]; then t_pass; else t_fail "launcher mode '$_m', want -rwxr--r--"; fi
+  if [ "$_m" = "-rwxr-xr-x" ]; then t_pass; else t_fail "launcher mode '$_m', want -rwxr-xr-x"; fi
+}
+# Executable by everyone, so the launcher must refuse anyone but its uid --
+# and the target must not run at all.
+t_launcher_refuses_to_run_as_anyone_but_root() {
+  { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- run as root, it would run"; t_pass; return; }
+  printf '%s\n' '#!/bin/sh' ": > '$T_DIR/ran'" > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
+  LAUNCHER_UID=0 cmd_create job "$T_DIR/bin/job" > /dev/null 2>&1
+  _e=$("$HELPER_DIR/my-fda-job" 2>&1); _rc=$?
+  if [ "$_rc" = "77" ] && [ ! -e "$T_DIR/ran" ] && case "$_e" in *"runs only as root"*"not as uid $(id -u)"*) true ;; *) false ;; esac
+  then t_pass; else t_fail "rc $_rc, ran: $([ -e "$T_DIR/ran" ] && echo yes || echo no), '$_e'"; fi
 }
 t_create_refuses_what_it_must() {
   printf '#!/bin/sh\n' > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
@@ -1955,7 +1982,28 @@ t_launcher_is_signed_under_its_own_name() {
   cmd_create job "$T_DIR/bin/job" > /dev/null 2>&1
   _s=$("$c_codesign" -dv "$HELPER_DIR/my-fda-job" 2>&1)
   case "$_s" in *linker-signed*) t_fail "only linker-signed: '$_s'"; return ;; esac
-  case "$_s" in *"Identifier=my-fda-job"*"Signature=adhoc"*) t_pass ;; *) t_fail "got '$_s'" ;; esac
+  # runtime: the hardened runtime, which ignores DYLD_ variables
+  case "$_s" in *"Identifier=my-fda-job"*"(adhoc,runtime)"*"Signature=adhoc"*) t_pass ;; *) t_fail "got '$_s'" ;; esac
+}
+# The attack the hardened runtime is there for: code put into the launcher
+# with DYLD_INSERT_LIBRARIES runs BEFORE main, so the uid check cannot stop it.
+t_launcher_takes_no_injected_code() {
+  { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
+  printf '#!/bin/sh\n' > "$T_DIR/bin/job"; chmod 755 "$T_DIR/bin/job"
+  cmd_create job "$T_DIR/bin/job" > /dev/null 2>&1
+  printf '%s\n' '#include <stdio.h>' \
+    "__attribute__((constructor)) static void in(void) { FILE *f = fopen(\"$T_DIR/injected\", \"w\"); if (f) fclose(f); }" \
+    > "$T_DIR/inject.c"
+  "$c_cc" -dynamiclib -o "$T_DIR/inject.dylib" "$T_DIR/inject.c" > /dev/null 2>&1 || { t_fail "cannot build the test library"; return; }
+  # the library works: it goes into a program built the same way, without
+  # the hardened runtime
+  printf 'int main(void) { return 0; }\n' > "$T_DIR/plain.c"
+  "$c_cc" -o "$T_DIR/plain" "$T_DIR/plain.c" > /dev/null 2>&1
+  DYLD_INSERT_LIBRARIES="$T_DIR/inject.dylib" "$T_DIR/plain" > /dev/null 2>&1
+  [ -e "$T_DIR/injected" ] || { t_fail "the test library never ran -- the test proves nothing"; return; }
+  rm -f "$T_DIR/injected"
+  DYLD_INSERT_LIBRARIES="$T_DIR/inject.dylib" "$HELPER_DIR/my-fda-job" > /dev/null 2>&1
+  if [ ! -e "$T_DIR/injected" ]; then t_pass; else t_fail "code was injected into the launcher"; fi
 }
 t_new_launcher_has_no_dot_in_its_name() {
   { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; } || { echo "  SKIP  $T_NAME -- no cc"; t_pass; return; }
@@ -2092,6 +2140,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_status_shows_target_grant_and_daemon t_test_kickstarts_the_one_daemon \
                 t_old_dotted_launcher_still_runs_its_job_and_is_flagged t_new_launcher_has_no_dot_in_its_name \
                 t_create_takes_its_name_from_the_target t_launcher_is_signed_under_its_own_name \
+                t_launcher_refuses_to_run_as_anyone_but_root t_launcher_takes_no_injected_code \
                 t_test_refuses_unused_and_ambiguous t_destroy_shows_then_go_deletes_launcher_and_grant \
                 t_list_refuses_without_root t_old_config_takes_new_keys_from_the_defaults \
                 t_config_setting_a_key_empty_names_it \
@@ -2128,16 +2177,16 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00088 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00089 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
-    --user)           [ "$_n" -ge 1 ] || err 00089 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --user)           [ "$_n" -ge 1 ] || err 00090 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --user=*)         USER_ARG="${_a#--user=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
     --list|--denied|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00090 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00091 "unknown option '$_a' (--help)" ;;
+                      err 00091 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00092 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -2146,15 +2195,15 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|denied|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00092 "no such command; you mean \`$US remove\`" ;;
+  rm)  err 00093 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00093 "unknown command '$CMD' (--help)" ;;
+  *)   err 00094 "unknown command '$CMD' (--help)" ;;
 esac
-[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00094 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00095 "--user goes with create -- the user a new launcher runs its target as"
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00095 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00096 "mktemp failed"
 trap 'rm -rf "$WORK"' EXIT
 trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 
