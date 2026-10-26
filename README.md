@@ -10,6 +10,14 @@ stops applying and the root job using it fails with "Operation not
 permitted". And the list in System Settings grows with every version ever
 granted.
 
+The same holds, worse, for what such a job tends to be granted instead: a
+shell or a general tool (curl, python3, perl, env, ...) gives Full Disk Access
+to whatever runs it; a grant on a script does nothing, as macOS checks its
+interpreter; and anything in Homebrew changes on upgrade and runs what its
+packages bring. `list` flags each of these (`SHELLS`, `GENERAL_TOOLS`,
+`BREW_TREES`), `denied` and `add` say the same, and the fix is always a
+launcher for the job.
+
 ## How
 
 A *launcher* holds the grant instead: a tiny compiled program, built once

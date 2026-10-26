@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="14de9c4"
+SCRIPT_COMMIT="0f5af6e"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -151,8 +151,13 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 or an app id), allowed[2] / denied[0] with the raw value, and
                 what to do with it:
                   GONE -> remove        the path or the app no longer exists
-                  Homebrew version path: breaks on upgrade -> my-fda
-                  a shell: every script it runs gets full disk access -> remove
+                  a shell, a general tool (GENERAL_TOOLS), a script, or
+                  anything in Homebrew (BREW_TREES) -> remove; its job
+                                        gets a launcher: whatever runs a
+                                        shell or a tool gets full disk
+                                        access, macOS checks a script's
+                                        interpreter, and Homebrew's files
+                                        change on upgrade
                   system extension      an Endpoint Security extension's
                                         grant: in the pane, not removed here
                   profile               given by a configuration profile
@@ -264,6 +269,15 @@ BREW_CELLARS="/opt/homebrew/Cellar /usr/local/Cellar"
 # Shells: a grant on one gives full disk access to every script it runs.
 SHELLS="/bin/sh /bin/bash /bin/zsh /bin/dash /bin/ksh /bin/tcsh /bin/csh"
 
+# Homebrew's trees: a grant on anything in them breaks on the next upgrade,
+# and gives full disk access to what its packages run. (BREW_CELLARS above
+# only keeps create off a version path: /opt/homebrew/bin/x is its target.)
+BREW_TREES="/opt/homebrew /usr/local/Cellar /usr/local/Caskroom /usr/local/Homebrew"
+
+# General tools, by file name (shell patterns): whatever runs one gets full
+# disk access too -- a job that needs it gets a launcher instead.
+GENERAL_TOOLS="curl wget python python[0-9]* perl perl[0-9]* ruby node env osascript php lua tclsh* expect"
+
 # The commands my-fda runs.
 c_sqlite3="/usr/bin/sqlite3"
 c_md5="/sbin/md5"
@@ -290,7 +304,7 @@ MDM_OVERRIDES="/Library/Application Support/com.apple.TCC/MDMOverrides.plist"
 _EOF
 }
 
-CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS
+CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS BREW_TREES GENERAL_TOOLS
   c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log DENIED_LAST_DEFAULT c_pbcopy"
 
 config_search_paths() {
@@ -372,6 +386,25 @@ ls_path() { # <bundle id>
   printf '%s\n' "${_lp%/}"
 }
 
+# What is wrong with <PATH> holding Full Disk Access -- a shell, a general
+# tool, a script, anything in Homebrew -- or nothing. Each caller adds what to
+# do, which differs: list takes a grant away, denied has none to take.
+grant_flag() { # <PATH>
+  _gf=""
+  for _gt in $BREW_TREES; do
+    case "$1" in "$_gt"/*) _gf="Homebrew: breaks on upgrade, and its packages' code gets full disk access" ;; esac
+  done
+  [ -f "$1" ] && [ "$(head -c 2 "$1" 2>/dev/null)" = "#!" ] && _gf="a script: macOS checks its interpreter, not the script"
+  for _gt in $GENERAL_TOOLS; do
+    # shellcheck disable=SC2254  # the pattern is a glob on purpose
+    case "${1##*/}" in $_gt) _gf="a general tool: whatever runs it gets full disk access" ;; esac
+  done
+  for _gt in $SHELLS; do
+    [ "$1" = "$_gt" ] && _gf="a shell: every script it runs gets full disk access"
+  done
+  printf '%s\n' "$_gf"
+}
+
 # One grant per line on stdin: type<TAB>client<TAB>auth<TAB>date.
 # Out: id<TAB>type<TAB>client<TAB>state<TAB>note<TAB>date<TAB>app path --
 # never an empty field ("-"): a TAB is IFS whitespace, and read would
@@ -398,12 +431,8 @@ classify() {
       if [ ! -e "$_c" ]; then
         _n="GONE -> remove"
       else
-        for _sh in $SHELLS; do
-          [ "$_c" = "$_sh" ] && _n="a shell: every script it runs gets full disk access -> remove"
-        done
-        for _cel in $BREW_CELLARS; do
-          case "$_c" in "$_cel"/*) _n="Homebrew version path: breaks on upgrade -> my-fda" ;; esac
-        done
+        _f=$(grant_flag "$_c")
+        [ -n "$_f" ] && _n="$_f -> remove; its job gets a launcher ($US create)"
       fi
     elif [ "$_t" = "0" ]; then
       # Spotlight off would make every app look gone: ask it about Finder first.
@@ -453,14 +482,16 @@ summary() {
     { rows++ }
     $5 ~ /^GONE/     { gone++ }
     $5 ~ /^Homebrew/ { brew++ }
+    $5 ~ /^a general tool/ { tool++ }
+    $5 ~ /^a script/ { script++ }
     $5 ~ /^a shell/  { shell++ }
     $5 ~ /^app/      { app++ }
     $5 ~ /^system extension/ { ext++ }
     $5 ~ /^profile/  { prof++ }
     END {
-      other = rows - gone - brew - shell - app - ext - prof
-      printf "%d grant(s): %d gone, %d on a Homebrew version path, %d shell(s), %d app(s), %d system extension(s), %d from profiles, %d other [rows %d]\n",
-        rows, gone, brew, shell, app, ext, prof, other, rows
+      other = rows - gone - brew - shell - tool - script - app - ext - prof
+      printf "%d grant(s): %d gone, %d in Homebrew, %d shell(s), %d general tool(s), %d script(s), %d app(s), %d system extension(s), %d from profiles, %d other [rows %d]\n",
+        rows, gone, brew, shell, tool, script, app, ext, prof, other, rows
     }'
 }
 
@@ -763,11 +794,8 @@ cmd_add() { # <PATH>
     msg "    > $_p is $_r -- macOS records the grant under that path"
     _p=$_r
   fi
-  for _cel in $BREW_CELLARS; do
-    case "$_p" in "$_cel"/*)
-      warn "    > a Homebrew version path: this grant breaks on the next upgrade -- a launcher lasts: $US create <NAME> <stable path>" ;;
-    esac
-  done
+  _f=$(grant_flag "$_p")
+  [ -n "$_f" ] && warn "    > $_f -- a launcher holds it for the job instead: $US create <TARGET>"
   _add_t=1; _add_c=$_p; _b=$(bundle_id "$_p")
   if [ -n "$_b" ]; then
     _add_t=0; _add_c=$_b
@@ -976,18 +1004,21 @@ refusals() {
 # the client first, the value raw, how often, when last (-V: first), the
 # binary that touched the file (-V: its path, and every one), what to do.
 render_refusals() { # <grants FILE>
-  awk -F '\t' -v vrb="$VRB" -v shells="$SHELLS" -v cellars="$BREW_CELLARS" -v us="$US" '
+  cat > "$WORK/refused.in"
+  cut -f 2 "$WORK/refused.in" | sort -u | while IFS= read -r _rc; do
+    printf '%s\t%s\n' "$_rc" "$(grant_flag "$_rc")"
+  done > "$WORK/flags"
+  awk -F '\t' -v vrb="$VRB" -v us="$US" '
     FILENAME == ARGV[1] { g[$3] = $4; gd[$3] = $6; next }
+    FILENAME == ARGV[2] { fl[$1] = $2; next }
     { k = $2 SUBSEP $3
       if (!(k in n)) { o[++rows] = k; first[k] = $1; cl[k] = $2; av[k] = $3 }
       n[k]++; last[k] = $1
       if (!((k, $4) in seen)) { seen[k, $4]; nv[k]++; via[k] = (via[k] == "" ? $4 : via[k] "," $4) } }
     END {
-      ns = split(shells, sh, " "); nc = split(cellars, ce, " ")
       for (i = 1; i <= rows; i++) {
         k = o[i]; c = cl[k]; note = ""
-        for (j = 1; j <= ns; j++) if (c == sh[j]) note = "a shell: give the job its own launcher -> " us " create"
-        for (j = 1; j <= nc; j++) if (index(c, ce[j] "/") == 1) note = "Homebrew version path: give the job a launcher -> " us " create"
+        if (fl[c] != "") note = fl[c] " -> give its job a launcher (" us " create)"
         if (note != "") ;
         # both dates are local "YYYY-MM-DD HH:MM:SS": they compare as strings
         else if (g[c] == "allowed[2]" && gd[c] > last[k]) note = "granted " gd[c] ", after the last refusal -- nothing to do"
@@ -1011,7 +1042,7 @@ render_refusals() { # <grants FILE>
         if (vrb == "1") l = l "first " first[k] "  "
         print l sprintf("last %s  via %-" wv "s  %s", last[k], vs[i], nt[i])
       }
-    }' "$1" -
+    }' "$1" "$WORK/flags" "$WORK/refused.in"
 }
 
 cmd_denied() { # [LAST]
@@ -1391,8 +1422,9 @@ t_world() {
   HELPER_DIR="$T_DIR/helpers"
   LAUNCHD_DIR="$T_DIR/daemons"
   FDA_PANE_URL="x-test-pane"
-  BREW_CELLARS="$T_DIR/Cellar"
+  BREW_CELLARS="$T_DIR/Cellar"; BREW_TREES="$T_DIR/Cellar"
   SHELLS="/bin/sh"
+  eval "$(default_config | grep '^GENERAL_TOOLS=')"   # the shipped list, from its one owner
   c_sqlite3=/usr/bin/sqlite3; c_md5=/sbin/md5; c_plutil=/usr/bin/plutil
   c_cc=/usr/bin/cc; c_xcode_select=/usr/bin/xcode-select; c_codesign=/usr/bin/codesign; c_csreq=/usr/bin/csreq
   c_killall=/usr/bin/true
@@ -1479,6 +1511,23 @@ t_denied_shows_the_raw_value() {
   _s=$(t_row 1 "$T_DIR/bin/tool" 0 | classify | awk -F '\t' '{ print $4 }')
   if [ "$_s" = "denied[0]" ]; then t_pass; else t_fail "got '$_s'"; fi
 }
+# The rule the user set: no general tool, nothing of Homebrew's, and no
+# script holds Full Disk Access -- each is flagged, whatever its name says.
+t_general_tool_homebrew_and_script_are_flagged() {
+  mkdir "$T_DIR/tools"
+  : > "$T_DIR/tools/curl"; : > "$T_DIR/tools/python3.14"; : > "$T_DIR/tools/plain"
+  printf '#!/bin/dash\n' > "$T_DIR/tools/job"
+  : > "$T_DIR/Cellar/x"
+  _bad=""
+  for _f in curl python3.14; do
+    case "$(t_row 1 "$T_DIR/tools/$_f" 2 | t_note_of)" in "a general tool"*"remove"*) ;; *) _bad="$_bad $_f" ;; esac
+  done
+  case "$(t_row 1 "$T_DIR/tools/job" 2 | t_note_of)" in "a script"*) ;; *) _bad="$_bad script" ;; esac
+  case "$(t_row 1 "$T_DIR/Cellar/x" 2 | t_note_of)" in "Homebrew"*) ;; *) _bad="$_bad homebrew" ;; esac
+  # and nothing for a plain program: the rule must not flag everything
+  [ "$(t_row 1 "$T_DIR/tools/plain" 2 | t_note_of)" = "-" ] || _bad="$_bad plain"
+  if [ -z "$_bad" ]; then t_pass; else t_fail "wrong for:$_bad"; fi
+}
 t_shell_is_flagged() {
   _n=$(t_row 1 /bin/sh 2 | t_note_of)
   case "$_n" in "a shell"*) t_pass ;; *) t_fail "got '$_n'" ;; esac
@@ -1490,7 +1539,7 @@ t_space_in_path_stays_one_client() {
 t_summary_adds_up() {
   _o=$({ t_row 1 "$T_DIR/nope" 2; t_row 1 "$T_DIR/Cellar/rsync/3.5.1/bin/rsync" 2
          t_row 1 /bin/sh 2; t_row 0 com.known.app 2; t_row 1 "$T_DIR/bin/tool" 2; } | classify | summary)
-  if [ "$_o" = "5 grant(s): 1 gone, 1 on a Homebrew version path, 1 shell(s), 1 app(s), 0 system extension(s), 0 from profiles, 1 other [rows 5]" ]; then t_pass; else t_fail "got '$_o'"; fi
+  if [ "$_o" = "5 grant(s): 1 gone, 1 in Homebrew, 1 shell(s), 0 general tool(s), 0 script(s), 1 app(s), 0 system extension(s), 0 from profiles, 1 other [rows 5]" ]; then t_pass; else t_fail "got '$_o'"; fi
 }
 t_id_is_first_stable_and_cut_returns_it() {
   t_grant 1 "$T_DIR/bin/tool"; t_grant 0 com.known.app
@@ -1759,7 +1808,7 @@ t_denied_says_what_to_do_from_the_grant() {
   case "$_o" in *"com.test.late "*"granted 2026-10-25 11:17:39, after the last refusal -- nothing to do"*) ;; *) t_fail "granted after: '$_o'"; return ;; esac
   case "$_o" in *"com.apple.AddressBook.abd "*"Apple's own, no grant"*) ;; *) t_fail "Apple: '$_o'"; return ;; esac
   case "$_o" in *"com.test.app "*"no grant (an app)"*) ;; *) t_fail "app: '$_o'"; return ;; esac
-  case "$_o" in *"rsync "*"Homebrew version path"*) t_pass ;; *) t_fail "cellar: '$_o'" ;; esac
+  case "$_o" in *"rsync "*"Homebrew: "*"give its job a launcher"*) t_pass ;; *) t_fail "cellar: '$_o'" ;; esac
 }
 t_denied_none_says_so_with_the_count() {
   t_check 191 1.1 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2 > "$T_DIR/tccd.log"
@@ -2125,7 +2174,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_found_app_is_app_with_its_path t_missing_app_is_gone \
                 t_nested_helper_is_not_gone \
                 t_missing_apple_app_is_never_gone t_spotlight_off_calls_no_app_gone \
-                t_denied_shows_the_raw_value t_shell_is_flagged \
+                t_denied_shows_the_raw_value t_shell_is_flagged t_general_tool_homebrew_and_script_are_flagged \
                 t_space_in_path_stays_one_client t_summary_adds_up \
                 t_id_is_first_stable_and_cut_returns_it t_grep_GONE_picks_only_grant_rows \
                 t_other_services_are_not_listed \
