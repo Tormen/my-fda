@@ -54,9 +54,9 @@ grant.
   row in TCC.db with auth 0 and the program's code requirement, TCC.db
   backed up first -- and opens the pane: one click there grants it, so the
   grant stays a person's act. Where TCC.db cannot be written, it puts the
-  path on the clipboard for +, Cmd-Shift-G, Cmd-V. A drag into the list can
-  be lost: the pane asks for the password and drops the item, without an
-  error (ada, macOS 27).
+  path on the clipboard for +, Cmd-Shift-G, Cmd-V, or offers a drag into the
+  list -- but only for a program the screen's user can execute: the pane
+  loses any other one dragged in, without an error (ada, macOS 27).
 
 ## Commands
 
