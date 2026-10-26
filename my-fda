@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="f8d706a"
+SCRIPT_COMMIT="283c669"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -1463,47 +1463,52 @@ t_world() {
   c_cc=/usr/bin/cc; c_xcode_select=/usr/bin/xcode-select; c_codesign=/usr/bin/codesign; c_csreq=/usr/bin/csreq
   c_dscl=/usr/bin/dscl; GROUP_ARG=""
   c_killall=/usr/bin/true
-  # Spotlight knows Finder and one app; open and launchctl log what they get.
-  # shellcheck disable=SC2016  # the stubs expand $1 when THEY run
-  printf '%s\n' '#!/bin/sh' \
-    'case "$1" in *com.apple.finder*) echo /System/Library/CoreServices/Finder.app ;;' \
-    '  *com.known.app*) echo /Applications/Known.app ;; esac' > "$T_DIR/stub/mdfind"
-  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/open.log'" > "$T_DIR/stub/open"
-  # launchctl logs what it gets; `asuser <uid> <program...>` runs the program
-  # shellcheck disable=SC2016  # the stub expands $1 and $@ when IT runs
-  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/launchctl.log'" \
-    '[ "$1" = asuser ] && { shift 2; exec "$@"; }' 'exit 0' > "$T_DIR/stub/launchctl"
-  # tccutil as macado showed it: it knows installed apps only (rc 64 for any
-  # other id); with no id it takes every grant of the service.
-  # shellcheck disable=SC2016  # the stub expands $1..$3 when IT runs
-  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/tccutil.log'" \
-    '[ "$1" = reset ] && [ "$2" = SystemPolicyAllFiles ] || exit 64' \
-    "[ -n \"\$3\" ] || exec /usr/bin/sqlite3 '$T_DIR/TCC.db' \"delete from access where service='$SERVICE';\"" \
-    'case "$3" in com.known.app|com.apple.*) ;; *) echo "tccutil: No such bundle identifier \"$3\"" >&2; exit 64 ;; esac' \
-    "exec /usr/bin/sqlite3 '$T_DIR/TCC.db' \"delete from access where service='$SERVICE' and client_type=0 and client='\$3';\"" \
-    > "$T_DIR/stub/tccutil"
-  chmod 755 "$T_DIR/stub/"*
-  printf '%s\n' '#!/bin/sh' "cat > '$T_DIR/stub/clipboard'" > "$T_DIR/stub/pbcopy"; chmod 755 "$T_DIR/stub/pbcopy"
-  c_pbcopy="$T_DIR/stub/pbcopy"
-  c_mdfind="$T_DIR/stub/mdfind"; c_open="$T_DIR/stub/open"; c_launchctl="$T_DIR/stub/launchctl"
-  c_tccutil="$T_DIR/stub/tccutil"
-  # LaunchServices knows a nested helper Spotlight does not index.
-  # shellcheck disable=SC2016  # the stub expands $2 when IT runs
-  printf '%s\n' '#!/bin/sh' \
-    'case "$2" in *com.nested.helper*) echo "/Applications/Big.app/Contents/Helper.app/" ;; *) echo "execution error (-1728)" >&2; exit 1 ;; esac' \
-    > "$T_DIR/stub/osascript"
-  chmod 755 "$T_DIR/stub/osascript"
-  c_osascript="$T_DIR/stub/osascript"
+  # the stubs of this run (t_stubs): they write into the test's own directory
+  export T_DIR
+  c_mdfind="$T_STUBS/mdfind"; c_open="$T_STUBS/open"; c_launchctl="$T_STUBS/launchctl"
+  c_tccutil="$T_STUBS/tccutil"; c_pbcopy="$T_STUBS/pbcopy"; c_osascript="$T_STUBS/osascript"
+  c_log="$T_STUBS/log"; DENIED_LAST_DEFAULT="1d"
   MDM_OVERRIDES="$T_DIR/MDMOverrides.plist"
-  # log logs what it gets and prints the tccd lines a test wrote
-  printf '%s\n' '#!/bin/sh' "echo \"\$*\" >> '$T_DIR/stub/log.log'" "cat '$T_DIR/tccd.log' 2>/dev/null" 'exit 0' > "$T_DIR/stub/log"
-  chmod 755 "$T_DIR/stub/log"
-  c_log="$T_DIR/stub/log"; DENIED_LAST_DEFAULT="1d"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
   # shellcheck disable=SC2329  # called through need_root
   is_root() { true; }
   VRB=0; QUIET=0; BACKUP_STAMP=""
   LAUNCHER_UID=$(id -u)   # the launchers built here run for the tester
+}
+# The stub commands, written ONCE per run into <DIR>: macOS checks every NEW
+# executable on its first run, through a service all blocks share (100 ms
+# against 5 ms for one already run, horse 2026-10-26) -- eight fresh stubs per
+# test made the blocks queue there. Each stub finds the test's own directory
+# in $T_DIR when it RUNS, and logs into $T_DIR/stub.
+t_stubs() { # <DIR>
+  mkdir -p "$1" || exit 1
+  # shellcheck disable=SC2016  # the stubs expand $1, $*, $T_DIR when THEY run
+  {
+    # Spotlight knows Finder and one app
+    printf '%s\n' '#!/bin/sh' \
+      'case "$1" in *com.apple.finder*) echo /System/Library/CoreServices/Finder.app ;;' \
+      '  *com.known.app*) echo /Applications/Known.app ;; esac' > "$1/mdfind"
+    # open and launchctl log what they get; `asuser <uid> <program...>` runs the program
+    printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/open.log"' > "$1/open"
+    printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/launchctl.log"' \
+      '[ "$1" = asuser ] && { shift 2; exec "$@"; }' 'exit 0' > "$1/launchctl"
+    # tccutil as macado showed it: it knows installed apps only (rc 64 for any
+    # other id); with no id it takes every grant of the service
+    printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/tccutil.log"' \
+      '[ "$1" = reset ] && [ "$2" = SystemPolicyAllFiles ] || exit 64' \
+      "[ -n \"\$3\" ] || exec /usr/bin/sqlite3 \"\$T_DIR/TCC.db\" \"delete from access where service='$SERVICE';\"" \
+      'case "$3" in com.known.app|com.apple.*) ;; *) echo "tccutil: No such bundle identifier \"$3\"" >&2; exit 64 ;; esac' \
+      "exec /usr/bin/sqlite3 \"\$T_DIR/TCC.db\" \"delete from access where service='$SERVICE' and client_type=0 and client='\$3';\"" \
+      > "$1/tccutil"
+    printf '%s\n' '#!/bin/sh' 'cat > "$T_DIR/stub/clipboard"' > "$1/pbcopy"
+    # LaunchServices knows a nested helper Spotlight does not index
+    printf '%s\n' '#!/bin/sh' \
+      'case "$2" in *com.nested.helper*) echo "/Applications/Big.app/Contents/Helper.app/" ;; *) echo "execution error (-1728)" >&2; exit 1 ;; esac' \
+      > "$1/osascript"
+    # log logs what it gets and prints the tccd lines a test wrote
+    printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/log.log"' 'cat "$T_DIR/tccd.log" 2>/dev/null' 'exit 0' > "$1/log"
+  } || exit 1
+  chmod 755 "$1"/*
 }
 t_grant() { # <type> <client> [auth] [service] -- quotes on its own, never through sql_q, which is under test
   "$c_sqlite3" "$TCC_DB" "insert into access (service, client, client_type, auth_value, last_modified) values ('${4:-$SERVICE}', '$(printf '%s' "$2" | sed "s/'/''/g")', $1, ${3:-2}, 1790000000);"
@@ -1538,7 +1543,7 @@ t_missing_apple_app_is_never_gone() {
   case "$_n" in GONE*) t_fail "got '$_n'" ;; *) t_pass ;; esac
 }
 t_spotlight_off_calls_no_app_gone() {
-  printf '#!/bin/sh\n' > "$T_DIR/stub/mdfind"
+  printf '#!/bin/sh\n' > "$T_DIR/stub/mdfind"; chmod 755 "$T_DIR/stub/mdfind"; c_mdfind="$T_DIR/stub/mdfind"
   _n=$(t_row 0 com.vanished.app 2 | t_note_of)
   case "$_n" in *"not checked"*) t_pass ;; *) t_fail "got '$_n'" ;; esac
 }
@@ -1781,7 +1786,7 @@ t_as_root_open_runs_in_the_screen_users_session() {
   [ "$_cu" = "0" ] && { echo "  SKIP  $T_NAME -- root is at the screen"; t_pass; return; }
   _o=$(cmd_add "$T_DIR/bin/tool" < /dev/null 2>&1)
   _lc=$(tr '\n' '|' < "$T_DIR/stub/launchctl.log" 2>/dev/null)
-  _want="asuser $_cu $T_DIR/stub/open x-test-pane|asuser $_cu $T_DIR/stub/open -R $T_DIR/bin/tool|"
+  _want="asuser $_cu $c_open x-test-pane|asuser $_cu $c_open -R $T_DIR/bin/tool|"
   _want="${_want}asuser $_cu $c_pbcopy|"   # the clipboard is the screen user's too
   if [ "$_lc" = "$_want" ]; then t_pass; else t_fail "launchctl got '$_lc', want '$_want', '$_o'"; fi
 }
@@ -2284,21 +2289,53 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_default_config_has_every_key t_config_offer_names_only_searched_paths \
                 t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
                 t_help_names_every_verb t_err_codes_unique_in_order_without_gaps"
-  _rt_n=0
-  for T_NAME in $T_ALL; do
-    case "$T_NAME" in *"$1"*) _rt_n=$((_rt_n + 1)) ;; esac
-  done
-  echo "1..$_rt_n"
+  # Each test builds its own world, so the selected tests are dealt
+  # round-robin into BLOCKS, one process per core, run in parallel (the
+  # spread puts the slow ones -- cc builds -- in different blocks). A test
+  # keeps its number from the list, whatever order it ends in; a TAP line is
+  # one write, so the lines never mix; what a block prints besides comes as
+  # one piece at the end. A block that dies leaves its tests "not ok".
+  _rt_tb=$(mktemp -d "${TMPDIR:-/tmp}/my-fda-tests.XXXXXX") || exit 1
   _rt_k=0
   for T_NAME in $T_ALL; do
-    case "$T_NAME" in *"$1"*) ;; *) continue ;; esac
-    _rt_k=$((_rt_k + 1)); _rt_bad=$T_BAD
-    t_world
-    "$T_NAME"
-    rm -rf "$T_DIR"
-    if [ "$T_BAD" = "$_rt_bad" ]; then echo "ok $_rt_k - $T_NAME"; else echo "not ok $_rt_k - $T_NAME"; fi
+    case "$T_NAME" in *"$1"*) _rt_k=$((_rt_k + 1)); printf '%s %s\n' "$_rt_k" "$T_NAME" >> "$_rt_tb/selected" ;; esac
   done
-  echo "tests: $T_OK passed, $T_BAD failed [$((T_OK + T_BAD))]"
+  _rt_n=$_rt_k
+  T_STUBS="$_rt_tb/stubs"; t_stubs "$T_STUBS"
+  echo "1..$_rt_n"
+  _rt_b=$(sysctl -n hw.ncpu 2>/dev/null) || _rt_b=1
+  [ "$_rt_b" -le "$_rt_n" ] || _rt_b=$_rt_n
+  [ "$_rt_b" -ge 1 ] || _rt_b=1
+  _rt_i=0
+  while [ "$_rt_i" -lt "$_rt_b" ]; do
+    (
+      while read -r _rt_k T_NAME; do
+        [ $(((_rt_k - 1) % _rt_b)) = "$_rt_i" ] || continue
+        _rt_bad=$T_BAD
+        { t_world; "$T_NAME"; } >> "$_rt_tb/detail.$_rt_i" 2>&1
+        rm -rf "$T_DIR"
+        if [ "$T_BAD" = "$_rt_bad" ]; then _rt_r="ok"; else _rt_r="not ok"; fi
+        echo "$_rt_r $_rt_k - $T_NAME"
+        echo "$_rt_k $_rt_r" >> "$_rt_tb/result.$_rt_i"
+        echo "$T_OK $T_BAD" > "$_rt_tb/count.$_rt_i"
+      done < "$_rt_tb/selected"
+    ) &
+    _rt_i=$((_rt_i + 1))
+  done
+  wait
+  cat "$_rt_tb"/detail.* 2>/dev/null
+  # a test with no result line: its block died -- it did not pass
+  cat "$_rt_tb"/result.* 2>/dev/null | cut -d ' ' -f 1 | sort -n > "$_rt_tb/done"
+  while read -r _rt_k T_NAME; do
+    grep -qx "$_rt_k" "$_rt_tb/done" && continue
+    echo "not ok $_rt_k - $T_NAME (its block ended before it)"; T_BAD=$((T_BAD + 1))
+  done < "$_rt_tb/selected"
+  for _rt_c in "$_rt_tb"/count.*; do
+    [ -f "$_rt_c" ] || continue
+    read -r _rt_o _rt_f < "$_rt_c"; T_OK=$((T_OK + _rt_o)); T_BAD=$((T_BAD + _rt_f))
+  done
+  rm -rf "$_rt_tb"
+  echo "tests: $T_OK passed, $T_BAD failed [$((T_OK + T_BAD))] -- $_rt_n test(s) in $_rt_b block(s)"
   [ "$T_BAD" = "0" ]
 }
 

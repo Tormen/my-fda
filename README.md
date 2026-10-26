@@ -148,3 +148,10 @@ arrives. `my-fda --create-config` prints the defaults. Search order: `$MY_FDA_CO
 
 They run against a TCC.db of their own, with stubs for launchctl, open and
 Spotlight -- never against the real one, and without root.
+
+Each test builds its own world, so they run in parallel: dealt round-robin
+into one block per core, each numbered by its place in the list, a block
+that dies leaving its tests `not ok`. The stub commands are written once per
+run -- macOS checks every new executable on its first run, through a service
+all blocks share, and fresh stubs per test made them queue there. The 86
+tests: 22.7 s one by one, 3.4 s now (horse, 16 cores), the same results.
