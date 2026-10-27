@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="283c669"
+SCRIPT_COMMIT="01bd150"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -24,6 +24,7 @@ SERVICE="kTCCServiceSystemPolicyAllFiles"
 SERVICE_ES="kTCCServiceEndpointSecurityClient"
 WORK=""
 PHASE="starting -- nothing was changed"
+TTY="/dev/tty"       # where a wait reads its Return (the tests point it elsewhere)
 
 err() { # <code> [text]
   _c="$1"; shift
@@ -682,12 +683,19 @@ pane_names() {
 }
 
 # The rest of the hand removal: open the pane, then wait at the keyboard.
+# Is someone at a terminal to press Return? Asked of the terminal itself, not
+# of stdin: `my-fda list | ... | my-fda remove go` has its IDs on stdin and
+# still a person in front of it (ada, 2026-10-27: a step piping the IDs skipped
+# the wait, and the grants taken away by hand counted as still there).
+# In a subshell: a failed redirection on : (a special builtin) ends dash itself.
+have_tty() { ( : < "$TTY" ) 2> /dev/null; }
+
 guide_wait() {
   gui_open "$FDA_PANE_URL" || warn "    > could not open the pane ($FDA_PANE_URL) -- open it by hand"
-  if [ -t 0 ] && [ -r /dev/tty ]; then
+  if have_tty; then
     PHASE="waiting for grants to be taken away by hand -- TCC.db backup: $BACKUP_FILE; '$US list' shows what is gone"
     printf '    > press Return when they are gone: '
-    read -r _x < /dev/tty
+    read -r _x < "$TTY"
   fi
 }
 
@@ -854,10 +862,10 @@ cmd_add() { # <PATH>
       say "    > (not by drag: the pane loses a program $SCREEN_USER cannot execute)"
     fi
   fi
-  if [ -t 0 ] && [ -r /dev/tty ]; then
+  if have_tty; then
     PHASE="waiting for the grant to be switched on"
     printf '    > press Return when it is ON: '
-    read -r _x < /dev/tty
+    read -r _x < "$TTY"
     grants_to "$WORK/all"
     awk -F '\t' -v t="$_add_t" -v c="$_add_c" '$2 == t && $3 == c && $4 == "allowed[2]"' "$WORK/all" > "$WORK/row"
     [ -s "$WORK/row" ] || err 00043 "'$_add_c' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- add it with + and switch it on, then $US list"
@@ -1473,6 +1481,7 @@ t_world() {
   # shellcheck disable=SC2329  # called through need_root
   is_root() { true; }
   VRB=0; QUIET=0; BACKUP_STAMP=""
+  TTY="$T_DIR/no-terminal"   # none, so no test waits for a Return -- unless it gives one
   LAUNCHER_UID=$(id -u)   # the launchers built here run for the tester
 }
 # The stub commands, written ONCE per run into <DIR>: macOS checks every NEW
@@ -1660,6 +1669,17 @@ t_gone_app_falls_back_to_sqlite() {
   if [ "$(t_count)" = "0" ] && [ "$_log" = "reset SystemPolicyAllFiles com.vanished.app" ] \
      && case "$_o" in *"[tccutil 0, sqlite 1, by hand 0, stay 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "count $(t_count) tccutil '$_log', '$_o'"; fi
+}
+# The ada case: IDs on stdin from a pipe, TCC.db read-only, a person at the
+# terminal -- the wait must still come, reading its Return from the terminal.
+t_guided_removal_waits_though_the_ids_come_from_a_pipe() {
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
+  t_grant 1 "$T_DIR/bin/tool"
+  chmod 444 "$TCC_DB"
+  printf '\n' > "$T_DIR/terminal"; TTY="$T_DIR/terminal"     # a person who presses Return
+  _o=$(printf '%s\n' "$(t_id 1 "$T_DIR/bin/tool")" | cmd_remove go 2>&1)
+  chmod 644 "$TCC_DB"
+  case "$_o" in *"press Return when they are gone"*) t_pass ;; *) t_fail "no wait: '$_o'" ;; esac
 }
 t_readonly_db_guides_and_fails() {
   [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
@@ -2252,7 +2272,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_remove_empty_pipe_is_nothing_to_do \
                 t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
                 t_installed_app_goes_through_tccutil t_gone_app_falls_back_to_sqlite \
-                t_readonly_db_guides_and_fails t_guide_names_each_grant_as_the_pane_does \
+                t_readonly_db_guides_and_fails t_guided_removal_waits_though_the_ids_come_from_a_pipe t_guide_names_each_grant_as_the_pane_does \
                 t_by_hand_the_wrong_row_is_said_and_fails \
                 t_gone_app_stays_where_nothing_can_take_it t_extension_grant_is_listed_and_not_taken_away \
                 t_profile_grants_are_listed t_reset_leaves_extension_grants \
