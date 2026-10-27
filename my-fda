@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="01bd150"
+SCRIPT_COMMIT="b820445"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -1443,6 +1443,13 @@ cmd_destroy() { # [go] <NAME>
   fi
 }
 
+# Ctrl-C (or TERM, HUP) ends a run with ONE line saying where it stopped, and
+# exit 130; WORK goes either way.
+interrupt_traps() {
+  trap 'rm -rf "$WORK"' EXIT
+  trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
+}
+
 ############################################################## tests
 
 T_OK=0; T_BAD=0; T_NAME=""
@@ -1680,6 +1687,38 @@ t_guided_removal_waits_though_the_ids_come_from_a_pipe() {
   _o=$(printf '%s\n' "$(t_id 1 "$T_DIR/bin/tool")" | cmd_remove go 2>&1)
   chmod 644 "$TCC_DB"
   case "$_o" in *"press Return when they are gone"*) t_pass ;; *) t_fail "no wait: '$_o'" ;; esac
+}
+# A REAL SIGINT at the wait for a Return. A test block runs in the background,
+# where dash ignores SIGINT for good, so the run is a fresh process (perl puts
+# SIGINT back to its default, then becomes dash) on the functions without main.
+t_ctrl_c_at_the_wait_ends_in_one_line_and_130() {
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
+  command -v perl > /dev/null || { echo "  SKIP  $T_NAME -- no perl to give the run its SIGINT back"; t_pass; return; }
+  sed '/^#* main$/,$d' "$(self_path)" > "$T_DIR/lib.sh"
+  mkfifo "$T_DIR/tty" || { t_fail "mkfifo"; return; }
+  sleep 30 > "$T_DIR/tty" & _w=$!                           # a terminal nobody types into
+  # shellcheck disable=SC2016  # the child expands its own $1.. and variables
+  perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' /bin/dash -c '
+    . "$1"; T_STUBS=$2; t_world; echo "$T_DIR" > "$3/child"
+    t_grant 1 "$T_DIR/bin/tool"; chmod 444 "$TCC_DB"; TTY="$3/tty"
+    interrupt_traps
+    cmd_remove go <<_EOF
+$(t_id 1 "$T_DIR/bin/tool")
+_EOF
+    echo "AFTER THE WAIT"' my-fda "$T_DIR/lib.sh" "$T_STUBS" "$T_DIR" > "$T_DIR/out" 2> "$T_DIR/err" &
+  _c=$!
+  _i=0
+  until grep -q 'press Return' "$T_DIR/out" 2> /dev/null || [ "$_i" -ge 100 ]; do sleep 0.1; _i=$((_i + 1)); done
+  kill -INT "$_c"; wait "$_c"; _rc=$?
+  kill "$_w" 2> /dev/null
+  _cd=$(cat "$T_DIR/child" 2> /dev/null); chmod 644 "$_cd/TCC.db" 2> /dev/null
+  _e=$(cat "$T_DIR/err"); _n=$(awk 'END { print NR }' "$T_DIR/err")
+  if [ "$_rc" = "130" ] && [ "$_n" = "1" ] \
+     && case "$_e" in "my-fda: interrupted (Ctrl-C) while waiting for grants to be taken away by hand"*) true ;; *) false ;; esac \
+     && ! grep -q 'AFTER THE WAIT' "$T_DIR/out" && [ -n "$_cd" ] && [ ! -d "$_cd/work" ]; then t_pass
+  else t_fail "rc $_rc, $_n stderr line(s) '$_e', work left: $([ -d "$_cd/work" ] && echo yes || echo no), out '$(cat "$T_DIR/out")'"
+  fi
+  rm -rf "$_cd"
 }
 t_readonly_db_guides_and_fails() {
   [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
@@ -2273,6 +2312,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_remove_unknown_id_changes_nothing t_remove_quote_in_client_deletes_that_one \
                 t_installed_app_goes_through_tccutil t_gone_app_falls_back_to_sqlite \
                 t_readonly_db_guides_and_fails t_guided_removal_waits_though_the_ids_come_from_a_pipe t_guide_names_each_grant_as_the_pane_does \
+                t_ctrl_c_at_the_wait_ends_in_one_line_and_130 \
                 t_by_hand_the_wrong_row_is_said_and_fails \
                 t_gone_app_stays_where_nothing_can_take_it t_extension_grant_is_listed_and_not_taken_away \
                 t_profile_grants_are_listed t_reset_leaves_extension_grants \
@@ -2401,8 +2441,7 @@ esac
 need_root
 load_config
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00103 "mktemp failed"
-trap 'rm -rf "$WORK"' EXIT
-trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
+interrupt_traps
 
 case "$CMD" in
   list)    cmd_list "$@" ;;

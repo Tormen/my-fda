@@ -155,3 +155,9 @@ that dies leaving its tests `not ok`. The stub commands are written once per
 run -- macOS checks every new executable on its first run, through a service
 all blocks share, and fresh stubs per test made them queue there. The 86
 tests: 22.7 s one by one, 3.4 s now (horse, 16 cores), the same results.
+
+Ctrl-C is tested with a real SIGINT, sent while a removal waits for its
+Return: exit 130, one line on stderr naming where it stopped, nothing after
+it run. A block runs in the background, where dash ignores SIGINT for good,
+so that test starts a fresh process through perl, which puts SIGINT back to
+its default (skipped without perl).
