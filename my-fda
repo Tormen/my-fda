@@ -153,6 +153,9 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 or an app id), allowed[2] / denied[0] with the raw value, and
                 what to do with it:
                   GONE -> remove        the path or the app no longer exists
+                  GONE: stays           a gone app where TCC.db cannot be
+                                        written: nothing can take it, and it
+                                        applies to nothing
                   a shell, a general tool (GENERAL_TOOLS), a script, or
                   anything in Homebrew (BREW_TREES) -> remove; its job
                                         gets a launcher: whatever runs a
@@ -416,7 +419,7 @@ grant_flag() { # <PATH>
 # never an empty field ("-"): a TAB is IFS whitespace, and read would
 # collapse two of them into one.
 classify() {
-  _spot=""
+  _spot=""; _wr=""
   while IFS="$TAB" read -r _sv _t _c _a _d; do
     [ -n "$_c" ] || continue
     case "$_a" in
@@ -454,7 +457,13 @@ classify() {
       else
         case "$_c" in
           com.apple.*) _n="app (Apple's own, not found by Spotlight or LaunchServices: kept)" ;;
-          *)           _n="GONE -> remove" ;;
+          *)
+            # what remove can do with it: tccutil does not know a gone app,
+            # so only sqlite takes it -- where TCC.db cannot be written it
+            # stays, and the pane does not show it either
+            if [ -z "$_wr" ]; then if tcc_writable; then _wr=yes; else _wr=no; fi; fi
+            if [ "$_wr" = "yes" ]; then _n="GONE -> remove"
+            else _n="GONE: stays -- TCC.db cannot be written here, and the grant applies to nothing"; fi ;;
         esac
       fi
     else
@@ -1754,6 +1763,21 @@ t_gone_app_stays_where_nothing_can_take_it() {
      && case "$_o" in *"these stay"*"cleaned up 0 of 1 GONE grant(s) [tccutil 0, sqlite 0, by hand 0, stay 1; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "rc $_rc count $(t_count), '$_o'"; fi
 }
+t_list_says_what_remove_does_for_a_gone_app() {
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
+  # list's '-> remove' is what `list | grep -- '-> remove' | cut -f 1 | remove go`
+  # acts on; where remove can only say "these stay", list said '-> remove' all the
+  # same, and a check counting those never passed (horse and ada, 2026-10-28)
+  t_grant 0 com.vanished.app
+  _w=$(QUIET=1 cmd_list | awk -F '\t' '/com.vanished.app/ { print $NF }')
+  chmod 444 "$TCC_DB"
+  _r=$(QUIET=1 cmd_list | awk -F '\t' '/com.vanished.app/ { print $NF }')
+  chmod 644 "$TCC_DB"
+  case "$_w|$_r" in
+    *"GONE -> remove"*"|"*"GONE: stays"*) case "$_r" in *"-> remove"*) t_fail "read-only: '$_r'" ;; *) t_pass ;; esac ;;
+    *) t_fail "writable '$_w', read-only '$_r'" ;;
+  esac
+}
 t_extension_grant_is_listed_and_not_taken_away() {
   t_grant 0 com.example.es 2 "$SERVICE_ES"; t_grant 1 "$T_DIR/bin/tool"
   _l=$(QUIET=1 cmd_list)
@@ -2314,7 +2338,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_readonly_db_guides_and_fails t_guided_removal_waits_though_the_ids_come_from_a_pipe t_guide_names_each_grant_as_the_pane_does \
                 t_ctrl_c_at_the_wait_ends_in_one_line_and_130 \
                 t_by_hand_the_wrong_row_is_said_and_fails \
-                t_gone_app_stays_where_nothing_can_take_it t_extension_grant_is_listed_and_not_taken_away \
+                t_gone_app_stays_where_nothing_can_take_it t_list_says_what_remove_does_for_a_gone_app t_extension_grant_is_listed_and_not_taken_away \
                 t_profile_grants_are_listed t_reset_leaves_extension_grants \
                 t_cleanup_without_go_changes_nothing t_cleanup_go_takes_only_the_gone \
                 t_cleanup_with_nothing_gone_is_nothing_to_do \

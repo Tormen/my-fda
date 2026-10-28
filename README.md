@@ -107,7 +107,8 @@ any other selection goes through the pipe `list` is made for:
   TCC.db can be written, else my-fda opens the pane and names each one as
   the pane does (a path's file name, an app's `.app` name) to take away
   with "-". A GONE app neither tccutil nor sqlite can take stays, said
-  once: the pane does not show it either, and it applies to nothing. Then
+  once: the pane does not show it either, and it applies to nothing --
+  `list` says so too (`GONE: stays`, not `-> remove`). Then
   the grants are read again, and anything else still there is an error.
   Even root with Full Disk Access may be refused a write (macOS 26 on
   macado); the probe for it must really write, since sqlite opens such a
