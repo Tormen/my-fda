@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="ad8fe08"
+SCRIPT_COMMIT="ab9431d"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -192,7 +192,7 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 column of a list line is enough):
                   $US list | grep 'denied\\[0\\]' | cut -f 1 | $US remove go
   remove --recommended [go]
-                every grant list marks "$TO_REMOVE" -- the same as
+                every grant that list marks "$TO_REMOVE" -- the same as
                   $US list | grep -- '$TO_REMOVE' | cut -f 1 | $US remove go
   cleanup [go]  the GONE grants -- the one class safe to take away without
                 looking: shows them; with go, takes them away
