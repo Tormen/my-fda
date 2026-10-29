@@ -73,6 +73,7 @@ grant.
     my-fda add <PATH>                 "+": lists PATH switched OFF, opens the pane -- you switch it on -- checks it
     my-fda remove <ID>...             "-": shows what it would take away
     my-fda remove go <ID>...          ...and takes it away
+    my-fda remove --recommended [go]  every grant that list marks '-> remove'
     my-fda cleanup [go]               the GONE grants: shows them; with go, takes them away
     my-fda reset [go]                 all grants at once, and what to give back
     my-fda create [<NAME>] <TARGET>   build and install a launcher; NAME defaults to the target's file name (--user <USER>: the target runs as USER; --group <GROUP>: with that primary group)
@@ -82,7 +83,10 @@ grant.
 
 A destructive command shows first and acts only with `go`. GONE grants --
 the one class safe to take away without looking -- go with `cleanup go`;
-any other selection goes through the pipe `list` is made for:
+everything `list` marks `-> remove` (GONE, a shell, a general tool, a
+script, Homebrew) with `remove --recommended go` -- a job that ran through
+one of those loses its access, so look at the list first. Any other
+selection goes through the pipe `list` is made for:
 
     my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove        # shows
     my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove go     # acts
