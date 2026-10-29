@@ -8,7 +8,7 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="b820445"
+SCRIPT_COMMIT="1ed8143"
 SCRIPT_RELEASE=""
 
 US="${0##*/}"
@@ -284,7 +284,7 @@ BREW_TREES="/opt/homebrew /usr/local/Cellar /usr/local/Caskroom /usr/local/Homeb
 
 # General tools, by file name (shell patterns): whatever runs one gets full
 # disk access too -- a job that needs it gets a launcher instead.
-GENERAL_TOOLS="curl wget python python[0-9]* perl perl[0-9]* ruby node env osascript php lua tclsh* expect"
+GENERAL_TOOLS="curl wget git python python[0-9]* perl perl[0-9]* ruby node env osascript php lua tclsh* expect"
 
 # The commands my-fda runs.
 c_sqlite3="/usr/bin/sqlite3"
@@ -1580,11 +1580,11 @@ t_denied_shows_the_raw_value() {
 # script holds Full Disk Access -- each is flagged, whatever its name says.
 t_general_tool_homebrew_and_script_are_flagged() {
   mkdir "$T_DIR/tools"
-  : > "$T_DIR/tools/curl"; : > "$T_DIR/tools/python3.14"; : > "$T_DIR/tools/plain"
+  : > "$T_DIR/tools/curl"; : > "$T_DIR/tools/python3.14"; : > "$T_DIR/tools/git"; : > "$T_DIR/tools/plain"
   printf '#!/bin/dash\n' > "$T_DIR/tools/job"
   : > "$T_DIR/Cellar/x"
   _bad=""
-  for _f in curl python3.14; do
+  for _f in curl python3.14 git; do   # git: ada, 2026-10-29 -- a git row switched off hung every git on an external volume
     case "$(t_row 1 "$T_DIR/tools/$_f" 2 | t_note_of)" in "a general tool"*"remove"*) ;; *) _bad="$_bad $_f" ;; esac
   done
   case "$(t_row 1 "$T_DIR/tools/job" 2 | t_note_of)" in "a script"*) ;; *) _bad="$_bad script" ;; esac
