@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="131b60f"
-SCRIPT_RELEASE="v0.2-3-g131b60f"
+SCRIPT_COMMIT="e29edee"
+SCRIPT_RELEASE="v0.2-4-ge29edee"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -1067,15 +1067,18 @@ refusals() { # [catch]
       b = substr($0, i); sub(/}.*/, "", b)
       return b
     }
-    function tree(p,   cmd, l, n, seen) {   # p and its parents, up to launchd; 0 when p is gone
+    function tree(p,   cmd, l, n, seen, f, c) {   # p and its parents, up to launchd; 0 when p is gone
       n = 0
       while (p > 1 && !(p in seen)) {
         seen[p]; l = ""
         cmd = ps " -o pid=,ppid=,user=,command= -p " p
         cmd | getline l; close(cmd)
         if (l == "") break
-        sub(/^ +/, "", l); print "   > " l; n++
-        sub(/^[0-9]+ +/, "", l); p = l; sub(/ .*/, "", p)
+        # ps pads its columns to the widest pid: one space each, the command as it is
+        split(l, f, /[ \t]+/); c = l; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[^ \t]+[ \t]+/, "", c)
+        if (f[1] == "") { f[1] = f[2]; f[2] = f[3]; f[3] = f[4] }
+        print "   > " f[1] " " f[2] " " f[3] " " c; n++
+        p = f[2]
       }
       return n
     }
@@ -2105,8 +2108,13 @@ t_denied_tells_an_ssh_login_from_a_job_with_no_parent() {
 # parent -- stopping at the first would show nothing at all.
 t_denied_catch_shows_the_refused_process_and_its_parents() {
   true & _gone=$!; wait "$_gone"
-  : | sleep 60 & _s=$!   # its stdin a pipe: lsof shows it with no NODE column
+  # shellcheck disable=SC2216  # the pipe is the point: lsof must show one, with no NODE column
+  : | sleep 60 & _s=$!
   _pp=$(ps -o ppid= -p "$_s" | tr -d ' ')
+  # ps pads a short ppid after a long pid (ada: "13644  9421 me"): padded on
+  # purpose here, so the test sees that spacing on every machine
+  printf '%s\n' '#!/bin/sh' '/bin/ps "$@" | sed "s/^ *\([0-9][0-9]*\)  */  \1     /"' > "$T_DIR/padded-ps"
+  chmod 755 "$T_DIR/padded-ps"; c_ps="$T_DIR/padded-ps"
   { t_check 191 3.1 "$SERVICE" /bin/sh /bin/sh 0 10:00:01 "$_gone" -
     t_check 191 3.2 "$SERVICE" /bin/sh /bin/sh 0 10:00:02 "$_s" -; } > "$T_DIR/tccd.log"
   _o=$( (CATCH=1; cmd_denied) 2>&1); _rc=$?
