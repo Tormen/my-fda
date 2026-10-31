@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="9b39808"
-SCRIPT_RELEASE="v0.2-2-g9b39808"
+SCRIPT_COMMIT="131b60f"
+SCRIPT_RELEASE="v0.2-3-g131b60f"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -1083,7 +1083,8 @@ refusals() { # [catch]
       cmd = lsof " -n -P -p " p " 2>/dev/null"
       while ((cmd | getline l) > 0) {
         if (n++ == 0) { print "   > its open files (lsof, while it ran):"; continue }   # the header
-        split(l, f, /[ \t]+/); sub(/^([^ \t]+[ \t]+){8}/, "", l)
+        # NAME is the 9th column on; a pipe or a socket has no NODE column
+        if (split(l, f, /[ \t]+/) >= 9) sub(/^([^ \t]+[ \t]+){8}/, "", l); else l = f[split(l, f, /[ \t]+/)]
         print "      " f[4] "  " f[5] "  " l
       }
       close(cmd)
@@ -2104,7 +2105,7 @@ t_denied_tells_an_ssh_login_from_a_job_with_no_parent() {
 # parent -- stopping at the first would show nothing at all.
 t_denied_catch_shows_the_refused_process_and_its_parents() {
   true & _gone=$!; wait "$_gone"
-  sleep 60 & _s=$!
+  : | sleep 60 & _s=$!   # its stdin a pipe: lsof shows it with no NODE column
   _pp=$(ps -o ppid= -p "$_s" | tr -d ' ')
   { t_check 191 3.1 "$SERVICE" /bin/sh /bin/sh 0 10:00:01 "$_gone" -
     t_check 191 3.2 "$SERVICE" /bin/sh /bin/sh 0 10:00:02 "$_s" -; } > "$T_DIR/tccd.log"
@@ -2115,6 +2116,7 @@ t_denied_catch_shows_the_refused_process_and_its_parents() {
   case "$_o" in *"pid $_gone ended before it could be looked at"*) ;; *) t_fail "gone: '$_o'"; return ;; esac
   case "$_o" in *"refused[0]  via /bin/sh  from (none"*"   > $_s $_pp "*"sleep 60"*"   > $_pp "*) ;; *) t_fail "tree: '$_o'"; return ;; esac
   case "$_o" in *"   > its open files (lsof, while it ran):"*"txt  REG  "*"/sleep"*) ;; *) t_fail "files: '$_o'"; return ;; esac
+  case "$_o" in *"  PIPE  "*" PIPE "*) t_fail "a pipe's columns as its name: '$_o'"; return ;; esac
   if [ "$_rc" = "0" ]; then t_pass; else t_fail "rc $_rc"; fi
 }
 t_denied_catch_takes_no_window_and_goes_with_denied_only() {
