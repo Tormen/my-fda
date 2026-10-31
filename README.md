@@ -75,7 +75,7 @@ grant.
 
     my-fda list                       every grant: an ID, the client, allowed/denied, what to do
     my-fda denied [<LAST>]            every program refused Full Disk Access in the system log (default: the last 1d)
-    my-fda denied --catch             waits for the next refusal: the refused process and its parents
+    my-fda denied --catch             waits for the next refusal: the refused process, its parents, its open files
     my-fda add <PATH>                 "+": lists PATH switched OFF, opens the pane -- you switch it on -- checks it
     my-fda remove <ID>...             "-": shows what it would take away
     my-fda remove go <ID>...          ...and takes it away
@@ -109,8 +109,9 @@ selection goes through the pipe `list` is made for:
   Access on unless System Settings > General > Sharing > Remote Login (i)
   allows it for remote users. `from -` is a program started with no parent
   macOS names (an app or agent spawning git, say) -- tccd's log does not say
-  who, so `denied --catch` waits for the next refusal and shows the process
-  and its parents while it still runs.
+  who, so `denied --catch` waits for the next refusal and shows the process,
+  its parents and its open files while it still runs -- tccd names no file
+  either, and what the process has open is the nearest there is.
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.
 - **A path is granted as its real path:** macOS records the file with its

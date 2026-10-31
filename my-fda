@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="074aeb9"
-SCRIPT_RELEASE="v0.2-1-g074aeb9"
+SCRIPT_COMMIT="9b39808"
+SCRIPT_RELEASE="v0.2-2-g9b39808"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -189,9 +189,10 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 an ssh login names Remote Login's own switch.
   denied --catch
                 waits for the next refusal and shows the refused process
-                with its parents, while it still runs -- the job behind a
-                program refused "from -"; it ends after the first one it
-                could still see, or on Ctrl-C
+                with its parents and the files it has open, while it still
+                runs -- the job behind a program refused "from -", and as
+                near as anything comes to the file it was refused; it ends
+                after the first one it could still see, or on Ctrl-C
   add <PATH>    "+": puts PATH into the Full Disk Access list switched OFF
                 and opens the pane -- macOS grants only on a click, so you
                 switch it on there -- then checks that it is on. Where
@@ -321,6 +322,7 @@ c_csreq="/usr/bin/csreq"
 c_dscl="/usr/bin/dscl"
 c_log="/usr/bin/log"
 c_ps="/bin/ps"
+c_lsof="/usr/sbin/lsof"
 
 # How far back denied reads the system log when given no window.
 DENIED_LAST_DEFAULT="1d"
@@ -332,7 +334,7 @@ _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS BREW_TREES GENERAL_TOOLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log c_ps DENIED_LAST_DEFAULT c_pbcopy c_dscl"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log c_ps c_lsof DENIED_LAST_DEFAULT c_pbcopy c_dscl"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -1043,9 +1045,11 @@ TCCD_PREDICATE='process == "tccd" AND (eventMessage BEGINSWITH "AUTHREQ_CTX" OR 
 # none, the program was started with no parent macOS attributes it to).
 # `refusals catch` reads `log stream` instead and, at each refusal, prints
 # the refused process and its parents while it may still run -- tccd's line
-# names no parent -- and stops after the first one it could still see.
+# names no parent -- then the files it has open, as near as anything comes
+# to the file it was refused (tccd's line names none either); it stops after
+# the first one it could still see.
 refusals() { # [catch]
-  awk -v svc="$SERVICE" -v catch="${1:-}" -v ps="$c_ps" '
+  awk -v svc="$SERVICE" -v catch="${1:-}" -v ps="$c_ps" -v lsof="$c_lsof" '
     function key(   p, m) {
       p = $4; sub(/^tccd\[/, "", p); sub(/:.*/, "", p)
       m = $0; sub(/.*msgID=/, "", m); sub(/,.*/, "", m)
@@ -1075,6 +1079,16 @@ refusals() { # [catch]
       }
       return n
     }
+    function files(p,   cmd, l, f, n) {   # what p has open: FD, TYPE and NAME of each
+      cmd = lsof " -n -P -p " p " 2>/dev/null"
+      while ((cmd | getline l) > 0) {
+        if (n++ == 0) { print "   > its open files (lsof, while it ran):"; continue }   # the header
+        split(l, f, /[ \t]+/); sub(/^([^ \t]+[ \t]+){8}/, "", l)
+        print "      " f[4] "  " f[5] "  " l
+      }
+      close(cmd)
+      if (n == 0) print "   > its open files: none seen -- it ended first"
+    }
     $6 == "AUTHREQ_CTX:"         { s[key()] = field("service", $0) }
     $6 == "AUTHREQ_SUBJECT:"     { c[key()] = field("subject", $0) }
     $6 == "AUTHREQ_ATTRIBUTION:" {
@@ -1091,7 +1105,7 @@ refusals() { # [catch]
         else printf "%s  %s  refused[%s]  via %s  from %s  uid %s  pid %s\n", t, cl, r, vv, (rr == "-" ? "(none: started with no parent macOS attributes it to)" : rr), uu, pp
         if (catch != "") {
           fflush()
-          if (pd[k] ~ /^[0-9]+$/ && tree(pd[k]) > 0) exit
+          if (pd[k] ~ /^[0-9]+$/ && tree(pd[k]) > 0) { files(pd[k]); exit }
           print "   > pid " pd[k] " ended before it could be looked at -- waiting for the next refusal"
           fflush()
         }
@@ -1594,7 +1608,7 @@ t_world() {
   export T_DIR
   c_mdfind="$T_STUBS/mdfind"; c_open="$T_STUBS/open"; c_launchctl="$T_STUBS/launchctl"
   c_tccutil="$T_STUBS/tccutil"; c_pbcopy="$T_STUBS/pbcopy"; c_osascript="$T_STUBS/osascript"
-  c_log="$T_STUBS/log"; c_ps=/bin/ps; DENIED_LAST_DEFAULT="1d"; CATCH=0
+  c_log="$T_STUBS/log"; c_ps=/bin/ps; c_lsof=/usr/sbin/lsof; DENIED_LAST_DEFAULT="1d"; CATCH=0
   MDM_OVERRIDES="$T_DIR/MDMOverrides.plist"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
   # shellcheck disable=SC2329  # called through need_root
@@ -2100,6 +2114,7 @@ t_denied_catch_shows_the_refused_process_and_its_parents() {
   case "$_l" in "stream "*) ;; *) t_fail "log got '$_l'"; return ;; esac
   case "$_o" in *"pid $_gone ended before it could be looked at"*) ;; *) t_fail "gone: '$_o'"; return ;; esac
   case "$_o" in *"refused[0]  via /bin/sh  from (none"*"   > $_s $_pp "*"sleep 60"*"   > $_pp "*) ;; *) t_fail "tree: '$_o'"; return ;; esac
+  case "$_o" in *"   > its open files (lsof, while it ran):"*"txt  REG  "*"/sleep"*) ;; *) t_fail "files: '$_o'"; return ;; esac
   if [ "$_rc" = "0" ]; then t_pass; else t_fail "rc $_rc"; fi
 }
 t_denied_catch_takes_no_window_and_goes_with_denied_only() {
