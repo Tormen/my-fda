@@ -18,6 +18,11 @@ packages bring. `list` flags each of these (`SHELLS`, `GENERAL_TOOLS`,
 `BREW_TREES`), `denied` and `add` say the same, and the fix is always a
 launcher for the job.
 
+Such a row switched off (`denied[0]`) grants nothing: macOS writes it when it
+refuses the program, and writes it back at the next refusal -- taking it away
+by hand only hides it until then. So `list` marks it for its job, not for
+`remove`, and `denied --catch` finds that job.
+
 ## How
 
 A *launcher* holds the grant instead: a tiny compiled program, built once
@@ -70,6 +75,7 @@ grant.
 
     my-fda list                       every grant: an ID, the client, allowed/denied, what to do
     my-fda denied [<LAST>]            every program refused Full Disk Access in the system log (default: the last 1d)
+    my-fda denied --catch             waits for the next refusal: the refused process and its parents
     my-fda add <PATH>                 "+": lists PATH switched OFF, opens the pane -- you switch it on -- checks it
     my-fda remove <ID>...             "-": shows what it would take away
     my-fda remove go <ID>...          ...and takes it away
@@ -83,9 +89,10 @@ grant.
 
 A destructive command shows first and acts only with `go`. GONE grants --
 the one class safe to take away without looking -- go with `cleanup go`;
-everything `list` marks `-> remove` (GONE, a shell, a general tool, a
-script, Homebrew) with `remove --recommended go` -- a job that ran through
-one of those loses its access, so look at the list first. Any other
+everything `list` marks `-> remove` (GONE, or a shell, a general tool, a
+script or Homebrew that is switched on) with `remove --recommended go` -- a
+job that ran through one of those loses its access, so look at the list
+first. Any other
 selection goes through the pipe `list` is made for:
 
     my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove        # shows
@@ -95,8 +102,15 @@ selection goes through the pipe `list` is made for:
   Full Disk Access just fails, often with a misleading error, and only
   tccd's lines in the system log say so. One line per program, as a grant
   names it, with how often, when last, the binary that touched the file
-  (`via`), and what to do -- `/bin/dash ... via /usr/sbin/diskutil  a
-  shell` is a root shell script running diskutil, and needs a launcher.
+  (`via`), the process macOS held responsible for it (`from`), and what to
+  do -- `/bin/dash ... via /usr/sbin/diskutil  from dash  a shell` is a root
+  shell script running diskutil, and needs a launcher. `from
+  sshd-keygen-wrapper` is an ssh login: Remote Login passes no Full Disk
+  Access on unless System Settings > General > Sharing > Remote Login (i)
+  allows it for remote users. `from -` is a program started with no parent
+  macOS names (an app or agent spawning git, say) -- tccd's log does not say
+  who, so `denied --catch` waits for the next refusal and shows the process
+  and its parents while it still runs.
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.
 - **A path is granted as its real path:** macOS records the file with its
@@ -159,7 +173,7 @@ into one block per core, each numbered by its place in the list, a block
 that dies leaving its tests `not ok`. The stub commands are written once per
 run -- macOS checks every new executable on its first run, through a service
 all blocks share, and fresh stubs per test made them queue there. The 86
-tests: 22.7 s one by one, 3.4 s now (horse, 16 cores), the same results.
+tests of 2026-10-26: 22.7 s one by one, 3.4 s now (horse, 16 cores), the same results.
 
 Ctrl-C is tested with a real SIGINT, sent while a removal waits for its
 Return: exit 130, one line on stderr naming where it stopped, nothing after
