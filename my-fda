@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="e29edee"
-SCRIPT_RELEASE="v0.2-4-ge29edee"
+SCRIPT_COMMIT="3dfadf5"
+SCRIPT_RELEASE="v0.2-5-g3dfadf5"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -18,6 +18,7 @@ USER_ARG=""          # create --user: the user the launcher runs its target as
 GROUP_ARG=""         # create --group: that user's primary group instead of their own
 RECOMMENDED=0        # remove --recommended: the grants list marks TO_REMOVE, instead of IDs
 CATCH=0              # denied --catch: wait for the next refusal instead of reading the past
+SERVICE_SEL=""       # denied --service: "" = DENIED_SERVICES, all, or a part of a service's name
 TO_REMOVE="-> remove" # list's mark on a grant to take away -- remove --recommended selects on it
 LAUNCHER_UID=0       # the only uid a launcher runs under: root (the tests set their own)
 TAB=$(printf '\t')
@@ -178,16 +179,32 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 An app id is GONE only when neither Spotlight nor
                 LaunchServices knows it (Spotlight misses helpers inside
                 other apps); Apple's own app ids are never called GONE.
-  denied [<LAST>]
-                every program macOS refused Full Disk Access, from the
-                system log of the last LAST (30m, 2h, 3d or boot; default
-                DENIED_LAST_DEFAULT, 1d), one line each: the program as a
-                grant names it, denied[0] with the raw value, how often,
-                when last (-V: first), the binary that touched the file
-                (via), the process macOS held responsible (from; "-": none,
-                -V: its path, uid and pid), and what to do. A refusal from
-                an ssh login names Remote Login's own switch.
-  denied --catch
+  denied [<PROGRAM>] [<LAST>] [--service <SERVICE>|all]
+                every file check macOS refused a program, from tccd's lines
+                in the system log of the last LAST (30m, 2h, 3d or boot;
+                default DENIED_LAST_DEFAULT, 1d), one line per program,
+                service, answer and tccd: the program as a grant names it,
+                the service (SystemPolicyAllFiles,
+                SystemPolicyRemovableVolumes, ...), the answer with its raw
+                values (denied[0] reason[5]: authValue, authReason), the
+                tccd that answered (system[0], or a user's: alice[501]), how
+                often, when last (-V: first), the binary that touched the
+                file (via), the process macOS held responsible (from; "-":
+                none; -V: its TCC identifier, path, uid and pid), and what
+                to do. A refusal from an ssh login names Remote Login's own
+                switch. A Full Disk Access probe that a narrower grant (the
+                volume, the folder) allowed right after refused nothing: it
+                is counted, -V shows it.
+                PROGRAM: a name (git) matches the program, via or from,
+                ignoring case; a path matches that file, its links
+                followed. A LAST starts with a digit, or is boot.
+                --service: by default the services in DENIED_SERVICES (the
+                file and folder protections); else every service whose
+                name holds SERVICE, ignoring case (RemovableVolumes,
+                volumes, Camera); all: every TCC service.
+                Without Full Disk Access (a LaunchDaemon) the grants are not
+                read, and it says so; the log still is.
+  denied --catch [<PROGRAM>] [--service <SERVICE>|all]
                 waits for the next refusal and shows the refused process
                 with its parents and the files it has open, while it still
                 runs -- the job behind a program refused "from -", and as
@@ -247,7 +264,8 @@ LAUNCHERS -- /Library/PrivilegedHelperTools/my-fda-<NAME>, root:wheel 755,
                 proves the grant (a run from a Terminal uses the Terminal's)
 
 Every command needs root, run from a Terminal that has Full Disk Access
-itself: the permission database is protected.
+itself: the permission database is protected. denied needs no Full Disk
+Access: it reads the log, and the grants only where it can.
 
 OPTIONS
   -V, --verbose         also: each command before it runs, the date (local time) of each
@@ -323,9 +341,16 @@ c_dscl="/usr/bin/dscl"
 c_log="/usr/bin/log"
 c_ps="/bin/ps"
 c_lsof="/usr/sbin/lsof"
+c_id="/usr/bin/id"
 
 # How far back denied reads the system log when given no window.
 DENIED_LAST_DEFAULT="1d"
+
+# The TCC services denied reports without --service: shell patterns, '|'
+# between them. kTCCServiceSystemPolicy* are the file and folder
+# protections (Full Disk Access, the removable and network volumes, Desktop,
+# Documents, Downloads, ...).
+DENIED_SERVICES="kTCCServiceSystemPolicy*"
 
 # Full Disk Access given by configuration profiles (MDM) -- listed, never
 # shown in System Settings.
@@ -334,7 +359,7 @@ _EOF
 }
 
 CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS BREW_TREES GENERAL_TOOLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log c_ps c_lsof DENIED_LAST_DEFAULT c_pbcopy c_dscl"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log c_ps c_lsof DENIED_LAST_DEFAULT c_pbcopy c_dscl c_id DENIED_SERVICES"
 
 config_search_paths() {
   printf '%s\n' "${LINKS:-/LINKS}/default/my-fda.conf" "${LINKS:-/LINKS}/default/my-fda" \
@@ -1030,26 +1055,65 @@ cmd_reset() { # [go]
 
 ############################################################## refusals
 
-# tccd logs each check in lines that share its msgID: AUTHREQ_CTX (the
+# tccd logs each check in lines that share its msgID: REQUEST (which tccd
+# answers: tccd_uid 0 is the system's, N that user's), AUTHREQ_CTX (the
 # service), AUTHREQ_SUBJECT (the client, as a grant names it),
-# AUTHREQ_ATTRIBUTION (the binary that touched the file) and AUTHREQ_RESULT
-# (authValue). A msgID is unique only within one tccd process, and the lines
-# of checks in flight interleave: they are joined by tccd pid + msgID, never
-# by order.
-TCCD_PREDICATE='process == "tccd" AND (eventMessage BEGINSWITH "AUTHREQ_CTX" OR eventMessage BEGINSWITH "AUTHREQ_SUBJECT" OR eventMessage BEGINSWITH "AUTHREQ_ATTRIBUTION" OR eventMessage BEGINSWITH "AUTHREQ_RESULT")'
+# AUTHREQ_ATTRIBUTION (the binary that touched the file, the process held
+# responsible) and AUTHREQ_RESULT (authValue, authReason). A msgID is unique
+# only within one tccd process, and the lines of checks in flight
+# interleave: they are joined by tccd pid + msgID, never by order.
+TCCD_PREDICATE='process == "tccd" AND (eventMessage BEGINSWITH "REQUEST:" OR eventMessage BEGINSWITH "AUTHREQ_CTX" OR eventMessage BEGINSWITH "AUTHREQ_SUBJECT" OR eventMessage BEGINSWITH "AUTHREQ_ATTRIBUTION" OR eventMessage BEGINSWITH "AUTHREQ_RESULT")'
 
-# `log show --style compact` lines on stdin -> one line per Full Disk Access
-# check that was not allowed: date time<TAB>client<TAB>authValue<TAB>via
-# <TAB>responsible<TAB>pid<TAB>uid -- via and pid are the process that
-# touched the file, responsible the one macOS held responsible for it ("-":
-# none, the program was started with no parent macOS attributes it to).
+# What denied reads, in words -- the services and the program -- and the
+# program as it is matched: a path as macOS records it, its links followed.
+# Sets _scope and _progarg.
+refusal_scope() { # [PROGRAM]
+  case "$SERVICE_SEL" in
+    "")  _scope="services $DENIED_SERVICES" ;;
+    all) _scope="every service" ;;
+    *)   _scope="services matching '$SERVICE_SEL'" ;;
+  esac
+  _progarg=${1:-}
+  case "$_progarg" in */*) _progarg=$(real_path "$_progarg") ;; esac
+  [ -z "$_progarg" ] || _scope="$_scope; $_progarg only"
+}
+
+# `log show --style compact` lines on stdin -> one line per check that was
+# not allowed, of the services denied selects and the program it was given:
+# date time, client, authValue, via, responsible, pid, uid, service,
+# authReason, tccd, the responsible's TCC identifier, refused|probe, and for
+# a probe the check that followed it (service, authValue, authReason,
+# tccd), TAB-separated. via and pid are the process that touched the file,
+# responsible the one macOS held responsible for it ("-": none, the program
+# was started with no parent macOS attributes it to); tccd is "system[0]"
+# or a user's, "alice[501]".
+# A PROBE: macOS asks Full Disk Access first and, when that is not allowed,
+# the narrower protection in its very next request -- the caller's msgID
+# is <caller pid>.<sequence>, whichever tccd answers. A Full Disk Access
+# answer that is not 2 is a probe when the caller's next sequence number,
+# within a second, is for the same accessing pid, another service, and
+# allowed: nothing was refused. So such an answer is held until the
+# caller's next one.
 # `refusals catch` reads `log stream` instead and, at each refusal, prints
-# the refused process and its parents while it may still run -- tccd's line
-# names no parent -- then the files it has open, as near as anything comes
-# to the file it was refused (tccd's line names none either); it stops after
-# the first one it could still see.
-refusals() { # [catch]
-  awk -v svc="$SERVICE" -v catch="${1:-}" -v ps="$c_ps" -v lsof="$c_lsof" '
+# the refused process and its parents -- looked at as the check ends, while
+# it may still run, since tccd's line names no parent -- then the files it
+# has open, as near as anything comes to the file it was refused (tccd's
+# line names none either); it stops after the first one it could still see.
+refusals() { # [catch] [PROGRAM]
+  _sm="set"; _sp=$DENIED_SERVICES
+  case "$SERVICE_SEL" in "") ;; all) _sm="all" ;; *) _sm="part"; _sp=$SERVICE_SEL ;; esac
+  awk -v svc="$SERVICE" -v catch="${1:-}" -v prog="${2:-}" -v selmode="$_sm" -v selpat="$_sp" \
+      -v ps="$c_ps" -v lsof="$c_lsof" -v idc="$c_id" '
+    BEGIN {
+      if (selmode == "set") {     # the shell patterns of DENIED_SERVICES as one regex
+        ng = split(selpat, g, "|"); setre = ""
+        for (i = 1; i <= ng; i++) {
+          r = g[i]; gsub(/\./, "\\.", r); gsub(/\*/, ".*", r); gsub(/\?/, ".", r)
+          setre = setre (setre == "" ? "" : "|") "^" r "$"
+        }
+      }
+      lsel = tolower(selpat); lprog = tolower(prog); progpath = (index(prog, "/") > 0)
+    }
     function key(   p, m) {
       p = $4; sub(/^tccd\[/, "", p); sub(/:.*/, "", p)
       m = $0; sub(/.*msgID=/, "", m); sub(/,.*/, "", m)
@@ -1067,7 +1131,26 @@ refusals() { # [catch]
       b = substr($0, i); sub(/}.*/, "", b)
       return b
     }
-    function tree(p,   cmd, l, n, seen, f, c) {   # p and its parents, up to launchd; 0 when p is gone
+    function short(x) { sub(/^kTCCService/, "", x); return x }
+    function base(x) { sub(/.*\//, "", x); return tolower(x) }
+    function secs(t,   a) { split(t, a, ":"); return a[1] * 3600 + a[2] * 60 + a[3] }
+    function tname(x,   cmd, l) {     # the tccd by its uid: system[0], alice[501]
+      if (x !~ /^[0-9]+$/) return "?"
+      if (x == "0") return "system[0]"
+      if (!(x in tn)) {
+        l = ""; cmd = idc " -un " x " 2>/dev/null"; cmd | getline l; close(cmd)
+        tn[x] = (l == "" ? "uid" : l) "[" x "]"
+      }
+      return tn[x]
+    }
+    function wanted(i) {               # of the services selected, and of the program
+      if (selmode == "set" && SV[i] !~ setre) return 0
+      if (selmode == "part" && index(tolower(SV[i]), lsel) == 0) return 0
+      if (prog == "") return 1
+      if (progpath) return (CL[i] == prog || VV[i] == prog || RR[i] == prog)
+      return (base(CL[i]) == lprog || base(VV[i]) == lprog || base(RR[i]) == lprog)
+    }
+    function tree(p,   cmd, l, n, seen, f, c) {   # p and its parents, up to launchd, into buf; 0 when p is gone
       n = 0
       while (p > 1 && !(p in seen)) {
         seen[p]; l = ""
@@ -1077,141 +1160,218 @@ refusals() { # [catch]
         # ps pads its columns to the widest pid: one space each, the command as it is
         split(l, f, /[ \t]+/); c = l; sub(/^[ \t]*[0-9]+[ \t]+[0-9]+[ \t]+[^ \t]+[ \t]+/, "", c)
         if (f[1] == "") { f[1] = f[2]; f[2] = f[3]; f[3] = f[4] }
-        print "   > " f[1] " " f[2] " " f[3] " " c; n++
+        buf = buf "   > " f[1] " " f[2] " " f[3] " " c "\n"; n++
         p = f[2]
       }
       return n
     }
-    function files(p,   cmd, l, f, n) {   # what p has open: FD, TYPE and NAME of each
+    function files(p,   cmd, l, f, n) {   # what p has open, into buf: FD, TYPE and NAME of each
       cmd = lsof " -n -P -p " p " 2>/dev/null"
       while ((cmd | getline l) > 0) {
-        if (n++ == 0) { print "   > its open files (lsof, while it ran):"; continue }   # the header
+        if (n++ == 0) { buf = buf "   > its open files (lsof, while it ran):\n"; continue }   # the header
         # NAME is the 9th column on; a pipe or a socket has no NODE column
         if (split(l, f, /[ \t]+/) >= 9) sub(/^([^ \t]+[ \t]+){8}/, "", l); else l = f[split(l, f, /[ \t]+/)]
-        print "      " f[4] "  " f[5] "  " l
+        buf = buf "      " f[4] "  " f[5] "  " l "\n"
       }
       close(cmd)
-      if (n == 0) print "   > its open files: none seen -- it ended first"
+      if (n == 0) buf = buf "   > its open files: none seen -- it ended first\n"
     }
+    function snap(i,   c) {           # catch: the process of check i, while it may still run
+      buf = ""; c = 0
+      if (PD[i] ~ /^[0-9]+$/) c = tree(PD[i])
+      if (c > 0) files(PD[i])
+      cap[i] = buf; ct[i] = c
+    }
+    function emit(i, kind, j) {
+      if (!wanted(i)) return
+      if (catch == "") {
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", T[i], CL[i], AV[i], VV[i], RR[i], PD[i], UU[i],
+          SV[i], AR[i], TU[i], IDN[i], kind, (j > 0 ? SV[j] : "-"), (j > 0 ? AV[j] : "-"), (j > 0 ? AR[j] : "-"), (j > 0 ? TU[j] : "-")
+        return
+      }
+      if (kind == "probe") return
+      printf "%s  %s  %s  refused[%s] reason[%s]  tccd %s  via %s  from %s  uid %s  pid %s\n", T[i], CL[i], short(SV[i]), AV[i], AR[i], TU[i],
+        VV[i], (RR[i] == "-" ? "(none: started with no parent macOS attributes it to)" : RR[i]), UU[i], PD[i]
+      if (ct[i] > 0) { printf "%s", cap[i]; done = 1; exit }
+      print "   > pid " PD[i] " ended before it could be looked at -- waiting for the next refusal"
+      fflush()
+    }
+    function forget(i) {
+      delete T[i]; delete D[i]; delete SS[i]; delete SN[i]; delete SQ[i]; delete CL[i]; delete AV[i]; delete AR[i]
+      delete VV[i]; delete RR[i]; delete PD[i]; delete UU[i]; delete SV[i]; delete TU[i]; delete IDN[i]; delete cap[i]; delete ct[i]
+    }
+    $6 == "REQUEST:"             { u[key()] = field("tccd_uid", $0) }
     $6 == "AUTHREQ_CTX:"         { s[key()] = field("service", $0) }
     $6 == "AUTHREQ_SUBJECT:"     { c[key()] = field("subject", $0) }
     $6 == "AUTHREQ_ATTRIBUTION:" {
       k = key(); b = block("accessing")
-      v[k] = field("binary_path", b); pd[k] = field("pid", b); u[k] = field("euid", b)
-      rp[k] = field("responsible_path", block("responsible"))
+      v[k] = field("binary_path", b); pd[k] = field("pid", b); uu[k] = field("euid", b)
+      b = block("responsible"); rp[k] = field("responsible_path", b); idn[k] = field("identifier", b)
     }
     $6 == "AUTHREQ_RESULT:"      {
-      k = key(); r = field("authValue", $0)
-      if (s[k] == svc && r != "2") {
-        t = $1 " " substr($2, 1, 8); cl = (c[k] == "" ? "?" : c[k]); vv = (v[k] == "" ? "-" : v[k])
-        rr = (rp[k] == "" ? "-" : rp[k]); pp = (pd[k] == "" ? "-" : pd[k]); uu = (u[k] == "" ? "-" : u[k])
-        if (catch == "") printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", t, cl, r, vv, rr, pp, uu
-        else printf "%s  %s  refused[%s]  via %s  from %s  uid %s  pid %s\n", t, cl, r, vv, (rr == "-" ? "(none: started with no parent macOS attributes it to)" : rr), uu, pp
-        if (catch != "") {
-          fflush()
-          if (pd[k] ~ /^[0-9]+$/ && tree(pd[k]) > 0) { files(pd[k]); exit }
-          print "   > pid " pd[k] " ended before it could be looked at -- waiting for the next refusal"
-          fflush()
-        }
+      k = key(); n++
+      m = $0; sub(/.*msgID=/, "", m); sub(/[, ].*/, "", m)
+      SN[n] = m; sub(/\..*/, "", SN[n]); SQ[n] = m; sub(/^[^.]*\./, "", SQ[n])
+      T[n] = $1 " " substr($2, 1, 8); D[n] = $1; SS[n] = secs($2)
+      CL[n] = (c[k] == "" ? "?" : c[k]); AV[n] = field("authValue", $0); AR[n] = field("authReason", $0)
+      VV[n] = (v[k] == "" ? "-" : v[k]); RR[n] = (rp[k] == "" ? "-" : rp[k])
+      PD[n] = (pd[k] == "" ? "-" : pd[k]); UU[n] = (uu[k] == "" ? "-" : uu[k])
+      SV[n] = s[k]; TU[n] = tname(u[k]); IDN[n] = (idn[k] == "" ? "-" : idn[k])
+      delete u[k]; delete s[k]; delete c[k]; delete v[k]; delete pd[k]; delete uu[k]; delete rp[k]; delete idn[k]
+      S = SN[n]
+      if (S in pend) {                 # the answer held for this caller: a probe, or refused
+        p = pend[S]; delete pend[S]
+        if (SQ[n] + 0 == SQ[p] + 1 && PD[n] == PD[p] && SV[n] != svc && AV[n] == "2" && D[n] == D[p] && SS[n] - SS[p] <= 1)
+          emit(p, "probe", n)
+        else emit(p, "refused", 0)
+        forget(p)
       }
-      delete s[k]; delete c[k]; delete v[k]; delete pd[k]; delete u[k]; delete rp[k]
+      if (AV[n] != "2") {
+        if (catch != "" && wanted(n)) snap(n)
+        if (SV[n] == svc) { pend[S] = n; next }
+        emit(n, "refused", 0)
+      }
+      forget(n)
+    }
+    END {                              # what was still held: no next answer came
+      if (done) exit
+      for (S in pend) inv[pend[S]] = 1
+      for (i = 1; i <= n; i++) if (i in inv) emit(i, "refused", 0)
     }'
 }
 
-# Refusals on stdin, the grants in <FILE> -> one line per client, value and
-# responsible process: the client first, the value raw, how often, when last
-# (-V: first), the binary that touched the file (-V: its path, and every
-# one), the process macOS held responsible (-V: its path, the user and the
-# last pid), what to do. An ssh login is responsible for what runs in it,
-# and Remote Login passes no Full Disk Access on unless the pane says so.
+# The checks of refusals on stdin, the grants in <FILE> -> one line per
+# client, service, answer, tccd and responsible process: the client first,
+# the service, the answer raw, the tccd, how often, when last (-V: first),
+# the binary that touched the file (-V: its path, and every one), the
+# process macOS held responsible (-V: its TCC identifier, path, the user
+# and the last pid), what to do. A probe is left out but for -V. An ssh
+# login is responsible for what runs in it, and Remote Login passes no Full
+# Disk Access on unless the pane says so.
 render_refusals() { # <grants FILE>
   cat > "$WORK/refused.in"
   cut -f 2 "$WORK/refused.in" | sort -u | while IFS= read -r _rc; do
     printf '%s\t%s\n' "$_rc" "$(grant_flag "$_rc")"
   done > "$WORK/flags"
-  awk -F '\t' -v vrb="$VRB" -v us="$US" '
+  awk -F '\t' -v vrb="$VRB" -v us="$US" -v svc="$SERVICE" '
+    function short(x) { sub(/^kTCCService/, "", x); return x }
     FILENAME == ARGV[1] { g[$3] = $4; gd[$3] = $6; next }
     FILENAME == ARGV[2] { fl[$1] = $2; next }
-    { k = $2 SUBSEP $3 SUBSEP $5
-      if (!(k in n)) { o[++rows] = k; first[k] = $1; cl[k] = $2; av[k] = $3; rs[k] = $5 }
-      n[k]++; last[k] = $1; uid[k] = $7; pid[k] = $6
+    $12 == "probe" && vrb != "1" { next }
+    { k = $2 SUBSEP $3 SUBSEP $5 SUBSEP $8 SUBSEP $9 SUBSEP $10 SUBSEP $12
+      if (!(k in n)) { o[++rows] = k; first[k] = $1; last[k] = $1; cl[k] = $2; av[k] = $3; rs[k] = $5
+                       sv[k] = $8; ar[k] = $9; tu[k] = $10; kind[k] = $12; pn[k] = $13 SUBSEP $14 SUBSEP $15 SUBSEP $16 }
+      n[k]++; uid[k] = $7; pid[k] = $6; idn[k] = $11
+      # held answers come out of order: the dates, local "YYYY-MM-DD HH:MM:SS", compare as strings
+      if ($1 < first[k]) first[k] = $1
+      if ($1 > last[k]) last[k] = $1
       if (!((k, $4) in seen)) { seen[k, $4]; nv[k]++; via[k] = (via[k] == "" ? $4 : via[k] "," $4) } }
     END {
       for (i = 1; i <= rows; i++) {
         k = o[i]; c = cl[k]; note = ""
-        if (rs[k] ~ /\/sshd-keygen-wrapper$/)
+        if (kind[k] == "probe") {
+          split(pn[k], q, SUBSEP)
+          note = "probe: then " short(q[1]) " allowed[" q[2] "] reason[" q[3] "] by tccd " q[4]
+        }
+        else if (rs[k] ~ /\/sshd-keygen-wrapper$/)
           note = "run in an ssh login -> System Settings > General > Sharing > Remote Login (i): Allow full disk access for remote users -- or run it through a launcher"
         else if (fl[c] != "" && rs[k] == "-")
           note = fl[c] " -> started with no parent macOS names: find who runs it (" us " denied --catch), give that a launcher (" us " create)"
         else if (fl[c] != "") note = fl[c] " -> give its job a launcher (" us " create)"
         if (note != "") ;
+        else if (sv[k] !~ /^kTCCServiceSystemPolicy/)
+          note = "not a file protection: System Settings > Privacy & Security > " short(sv[k])
+        else if (c ~ /^com\.apple\./ || c ~ /^\/(System|bin|sbin|usr\/bin|usr\/sbin|usr\/libexec|Library\/Apple)\//)
+          note = "Apple'"'"'s own, no grant: macOS refuses it routinely -- act only if a job of yours runs through it (via)"
+        else if (sv[k] != svc) note = "no grant here -> give its job a launcher with Full Disk Access (" us " create)"
         # both dates are local "YYYY-MM-DD HH:MM:SS": they compare as strings
         else if (g[c] == "allowed[2]" && gd[c] > last[k]) note = "granted " gd[c] ", after the last refusal -- nothing to do"
         else if (g[c] == "allowed[2]") note = "granted, still refused: the grant no longer matches the binary -> " us " remove it, then add"
         else if (g[c] == "denied[0]") note = "switched OFF in the pane -> switch it on there, if it should have it"
-        else if (c ~ /^com\.apple\./ || c ~ /^\/(System|bin|sbin|usr\/bin|usr\/sbin|usr\/libexec|Library\/Apple)\//)
-          note = "Apple'"'"'s own, no grant: macOS refuses it routinely -- act only if a job of yours runs through it (via)"
         else if (c ~ /^\//) note = "no grant -> " us " add " c
         else note = "no grant (an app) -> System Settings > Full Disk Access, +"
-        st[i] = (av[k] == "0" ? "denied[0]" : "other[" av[k] "]")
-        cnt[i] = n[k] "x"; nt[i] = note
+        st[i] = (av[k] == "0" ? "denied[0]" : "other[" av[k] "]") " reason[" ar[k] "]"
+        ss[i] = short(sv[k]); cnt[i] = n[k] "x"; nt[i] = note
         if (vrb == "1") vs[i] = via[k]
         else { vs[i] = via[k]; sub(/,.*/, "", vs[i]); sub(/.*\//, "", vs[i]); if (nv[k] > 1) vs[i] = vs[i] " (+" nv[k] - 1 ")" }
         fr[i] = rs[k]
-        if (vrb == "1") fr[i] = fr[i] " uid " uid[k] " pid " pid[k]
+        if (vrb == "1") fr[i] = (idn[k] == "-" || rs[k] == "-" ? "" : idn[k] " ") fr[i] " uid " uid[k] " pid " pid[k]
         else sub(/.*\//, "", fr[i])
         if (length(c) > w) w = length(c)
+        if (length(ss[i]) > ws) ws = length(ss[i])
+        if (length(st[i]) > wa) wa = length(st[i])
+        if (length(tu[k]) > wt) wt = length(tu[k])
         if (length(cnt[i]) > wn) wn = length(cnt[i])
         if (length(vs[i]) > wv) wv = length(vs[i])
         if (length(fr[i]) > wf) wf = length(fr[i])
       }
       for (i = 1; i <= rows; i++) {
         k = o[i]
-        l = sprintf("%-" w "s  %s  %" wn "s  ", cl[k], st[i], cnt[i])
+        l = sprintf("%-" w "s  %-" ws "s  %-" wa "s  tccd %-" wt "s  %" wn "s  ", cl[k], ss[i], st[i], tu[k], cnt[i])
         if (vrb == "1") l = l "first " first[k] "  "
         print l sprintf("last %s  via %-" wv "s  from %-" wf "s  %s", last[k], vs[i], fr[i], nt[i])
       }
     }' "$1" "$WORK/flags" "$WORK/refused.in"
 }
 
-cmd_denied() { # [LAST]
-  [ $# -le 1 ] || err 00055 "usage: $US denied [<LAST>]"
-  if [ "$CATCH" = "1" ]; then catch_refusal "$@"; return; fi
-  _last="${1:-$DENIED_LAST_DEFAULT}"
+# denied [PROGRAM] [LAST]: told apart by their shape -- a LAST starts with a
+# digit, or is boot.
+cmd_denied() { # [PROGRAM] [LAST]
+  _prog=""; _last=""
+  for _a in "$@"; do
+    case "$_a" in
+      boot|[0-9]*) [ -z "$_last" ] || err 00055 "two windows, '$_last' and '$_a' -- usage: $US denied [<PROGRAM>] [<LAST>]"; _last=$_a ;;
+      *)           [ -z "$_prog" ] || err 00056 "two programs, '$_prog' and '$_a' -- usage: $US denied [<PROGRAM>] [<LAST>]"; _prog=$_a ;;
+    esac
+  done
+  if [ "$CATCH" = "1" ]; then
+    [ -z "$_last" ] || err 00057 "denied --catch takes no LAST -- it waits for the next refusal"
+    catch_refusal "$_prog"; return
+  fi
+  _last="${_last:-$DENIED_LAST_DEFAULT}"
   case "$_last" in
     boot) ;;
-    ""|[!0-9]*|*[!0-9mhd]*|*[mhd]?*) err 00056 "LAST='$_last': a number with m, h or d (30m, 2h, 3d), or boot -- what log show --last takes" ;;
+    ""|[!0-9]*|*[!0-9mhd]*|*[mhd]?*) err 00058 "LAST='$_last': a number with m, h or d (30m, 2h, 3d), or boot -- what log show --last takes" ;;
   esac
-  [ -x "$c_log" ] || err 00057 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
+  [ -x "$c_log" ] || err 00059 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
+  refusal_scope "$_prog"
   PHASE="reading the system log -- nothing was changed"
-  msg " >>> tccd's checks in the system log of the last $_last -- a long window takes a while"
+  msg " >>> tccd's checks in the system log of the last $_last ($_scope) -- a long window takes a while"
   run "$c_log" show --style compact --last "$_last" --predicate "$TCCD_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
-    || err 00058 "log show failed: $(cat "$WORK/log.err")"
+    || err 00060 "log show failed: $(cat "$WORK/log.err")"
   _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ } END { print n+0 }' "$WORK/log")
-  refusals < "$WORK/log" > "$WORK/refused"
-  if [ ! -s "$WORK/refused" ]; then
-    msg "no Full Disk Access refused in the last $_last [tccd checks read: $_r]"
+  refusals "" "$_progarg" < "$WORK/log" > "$WORK/checks"
+  awk -F '\t' '$12 == "refused"' "$WORK/checks" > "$WORK/refused"
+  _pb=$(awk -F '\t' '$12 == "probe" { n++ } END { print n+0 }' "$WORK/checks")
+  _pr=""; [ "$_pb" = "0" ] || _pr="; $_pb probe(s) a narrower grant then allowed (-V)"
+  if [ ! -s "$WORK/refused" ] && { [ "$_pb" = "0" ] || [ "$VRB" != "1" ]; }; then
+    msg "nothing refused in the last $_last ($_scope)$_pr [tccd checks read: $_r]"
     return 0
   fi
-  grants_to "$WORK/every"
+  # The grants say what to do; without Full Disk Access (a LaunchDaemon)
+  # they cannot be read, and the log alone has to do.
+  if ! ( grants_to "$WORK/every" ) 2> "$WORK/grants.err"; then
+    : > "$WORK/every"
+    msg "    > grants not read ($(head -n 1 "$WORK/grants.err")) -- what to do is from the log alone"
+  fi
   ours < "$WORK/every" > "$WORK/all"
-  render_refusals "$WORK/all" < "$WORK/refused"
-  [ "$QUIET" = "1" ] || awk -F '\t' -v last="$_last" -v r="$_r" '
+  render_refusals "$WORK/all" < "$WORK/checks"
+  [ "$QUIET" = "1" ] || awk -F '\t' -v last="$_last" -v scope="$_scope" -v pr="$_pr" -v r="$_r" '
     { rows++; if (!($2 in c)) { c[$2]; progs++ } }
-    END { printf "%d refused check(s) from %d program(s) in the last %s [tccd checks read: %d]\n", rows, progs, last, r }' "$WORK/refused"
+    END { printf "%d refused check(s) from %d program(s) in the last %s (%s)%s [tccd checks read: %d]\n", rows, progs, last, scope, pr, r }' "$WORK/refused"
 }
 
 # denied --catch: the next refusals as they happen, each with the refused
 # process and its parents -- the job behind a program that macOS names with
 # no responsible parent. Ends after the first whose process could still be
 # seen, or on Ctrl-C.
-catch_refusal() {
-  [ $# -eq 0 ] || err 00059 "denied --catch takes no LAST -- it waits for the next refusal"
-  [ -x "$c_log" ] || err 00060 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
+catch_refusal() { # [PROGRAM]
+  [ -x "$c_log" ] || err 00061 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
+  refusal_scope "${1:-}"
   PHASE="waiting for the next refusal -- nothing was changed"
-  msg " >>> waiting for the next program refused Full Disk Access, then its parents (Ctrl-C to stop)"
-  "$c_log" stream --style compact --predicate "$TCCD_PREDICATE" 2> "$WORK/log.err" | refusals catch | tee "$WORK/caught"
-  [ -s "$WORK/caught" ] || err 00061 "log stream ended with no refusal: $(cat "$WORK/log.err")"
+  msg " >>> waiting for the next refused check ($_scope), then its process, parents and open files (Ctrl-C to stop)"
+  "$c_log" stream --style compact --predicate "$TCCD_PREDICATE" 2> "$WORK/log.err" | refusals catch "$_progarg" | tee "$WORK/caught"
+  [ -s "$WORK/caught" ] || err 00062 "log stream ended with no refusal: $(cat "$WORK/log.err")"
 }
 
 ############################################################## launchers
@@ -1303,7 +1463,7 @@ static int become_user(void) {
             }
         }
     }
-    fprintf(stderr, "ERROR 00062 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_AS
+    fprintf(stderr, "ERROR 00063 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_AS
             " (%s: %s) -- its LaunchDaemon must start it as root\n", step, errno ? strerror(errno) : "no such user or group");
     return 0;
 }
@@ -1320,7 +1480,7 @@ int main(int argc, char **argv) {
 
     (void)argc;
     if (getuid() != MY_FDA_RUN_UID) {
-        fprintf(stderr, "ERROR 00063 [77]: my-fda-" MY_FDA_NAME ": runs only as root, started by its"
+        fprintf(stderr, "ERROR 00064 [77]: my-fda-" MY_FDA_NAME ": runs only as root, started by its"
                 " LaunchDaemon -- not as uid %d\n", (int)getuid());
         return 77;
     }
@@ -1334,7 +1494,7 @@ int main(int argc, char **argv) {
 
     rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
     if (rc != 0) {
-        fprintf(stderr, "ERROR 00064 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
+        fprintf(stderr, "ERROR 00065 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
                 MY_FDA_TARGET, strerror(rc));
         return 70;
     }
@@ -1342,7 +1502,7 @@ int main(int argc, char **argv) {
 
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
-            fprintf(stderr, "ERROR 00065 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            fprintf(stderr, "ERROR 00066 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
             return 70;
         }
     }
@@ -1374,7 +1534,7 @@ launcher_path() { # <NAME>
 
 check_name() { # <NAME>
   case "$1" in
-    ""|*[!A-Za-z0-9._-]*) err 00066 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+    ""|*[!A-Za-z0-9._-]*) err 00067 "name '$1': letters, digits, '.', '_' and '-' only" ;;
   esac
 }
 
@@ -1403,65 +1563,65 @@ cmd_create() { # [NAME] <TARGET>
     1) set -- "$(name_of "$1")" "$1"
        msg "    > NAME $1, from the target's file name -- $US create <NAME> <TARGET> chooses another" ;;
     2) ;;
-    *) err 00067 "usage: $US create [<NAME>] <TARGET>" ;;
+    *) err 00068 "usage: $US create [<NAME>] <TARGET>" ;;
   esac
   check_name "$1"
-  case "$1" in *.*) err 00068 "name '$1': no '.' -- my-fda-$1 would look like a document, and the pane cannot add it" ;; esac
+  case "$1" in *.*) err 00069 "name '$1': no '.' -- my-fda-$1 would look like a document, and the pane cannot add it" ;; esac
   _t=$2
   _l=$(launcher_path "$1")
-  case "$_t" in /*) ;; *) err 00069 "target '$_t' must be an absolute path" ;; esac
-  case "$_t" in *\"*|*\\*) err 00070 "target '$_t': no '\"' or '\\' in the path" ;; esac
-  [ -f "$_t" ] && [ -x "$_t" ] || err 00071 "target '$_t' is not an executable file"
+  case "$_t" in /*) ;; *) err 00070 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00071 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00072 "target '$_t' is not an executable file"
   for _cel in $BREW_CELLARS; do
     case "$_t" in "$_cel"/*)
-      err 00072 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+      err 00073 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
     esac
   done
   for _sh in $SHELLS; do
-    [ "$_t" = "$_sh" ] && err 00073 "target '$_t' is a shell: every script it runs would get full disk access"
+    [ "$_t" = "$_sh" ] && err 00074 "target '$_t' is a shell: every script it runs would get full disk access"
   done
   if [ -n "$USER_ARG" ]; then
-    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00074 "--user '$USER_ARG': not a user name" ;; esac
-    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00075 "--user '$USER_ARG': no such user on this machine"
-    [ "$_uid" != "0" ] || err 00076 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
+    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00075 "--user '$USER_ARG': not a user name" ;; esac
+    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00076 "--user '$USER_ARG': no such user on this machine"
+    [ "$_uid" != "0" ] || err 00077 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
   fi
   if [ -n "$GROUP_ARG" ]; then
-    [ -n "$USER_ARG" ] || err 00077 "--group goes with --user: it is the primary group the launcher takes when it becomes that user"
-    case "$GROUP_ARG" in (*[!A-Za-z0-9._-]*) err 00078 "--group '$GROUP_ARG': not a group name" ;; esac
+    [ -n "$USER_ARG" ] || err 00078 "--group goes with --user: it is the primary group the launcher takes when it becomes that user"
+    case "$GROUP_ARG" in (*[!A-Za-z0-9._-]*) err 00079 "--group '$GROUP_ARG': not a group name" ;; esac
     "$c_dscl" . -read "/Groups/$GROUP_ARG" PrimaryGroupID > /dev/null 2>&1 \
-      || err 00079 "--group '$GROUP_ARG': no such group on this machine"
+      || err 00080 "--group '$GROUP_ARG': no such group on this machine"
   fi
-  [ -e "$_l" ] && err 00080 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  [ -e "$_l" ] && err 00081 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00081 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00082 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00082 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00083 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
   run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" "-DMY_FDA_RUN_UID=$LAUNCHER_UID" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} ${GROUP_ARG:+"-DMY_FDA_GROUP=\"$GROUP_ARG\""} \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00083 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00084 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00084 "the built launcher does not carry its target marker -- not installed"
+    || err 00085 "the built launcher does not carry its target marker -- not installed"
   [ "$(user_of "$WORK/launcher")" = "$USER_ARG" ] \
-    || err 00085 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
+    || err 00086 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
   [ "$(group_of "$WORK/launcher")" = "$GROUP_ARG" ] \
-    || err 00086 "the built launcher does not carry its group marker ($GROUP_ARG) -- not installed"
+    || err 00087 "the built launcher does not carry its group marker ($GROUP_ARG) -- not installed"
   # cc only linker-signs, under the temp file's name: the Full Disk Access
   # pane takes such a file with + but loses it when dragged in (ada,
   # 2026-10-26). A real ad-hoc signature under its own name, as my-tm signs
   # my-tm-launcher, is dragged in like any other program.
   run "$c_codesign" -s - -f -o runtime -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
-    || err 00087 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
+    || err 00088 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
   # 755: System Settings, running as the screen's user, loses a dragged-in
   # program that user cannot execute (ada, 2026-10-26); the launcher itself
   # refuses to run as anyone but root, so executing it grants nothing
   if [ "$(id -u)" = "0" ]; then run install -m 755 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00088 "cannot install '$_l'"
+  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00089 "cannot install '$_l'"
   msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG${GROUP_ARG:+:$GROUP_ARG}} [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it${USER_ARG:+ (and no UserName in it)}, and $US test $1"
 }
@@ -1472,12 +1632,12 @@ launcher_of() { # <NAME>
   _lo=$(launcher_path "$1")
   # a launcher from before 2026-10-22, named with a dot, still runs its job
   [ -e "$_lo" ] || [ ! -e "$HELPER_DIR/my-fda.$1" ] || _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00089 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00090 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00090 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00091 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -1522,21 +1682,21 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00091 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00092 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00092 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00093 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00093 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00094 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   _as=$(user_of "$_l")
   if [ -n "$_as" ] && _un=$("$c_plutil" -extract UserName raw -o - "$_pl" 2>/dev/null); then
-    err 00094 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
+    err 00095 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
   fi
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00095 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00096 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -1548,7 +1708,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00096 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00097 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -1565,7 +1725,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00097 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00098 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
@@ -1612,7 +1772,8 @@ t_world() {
   export T_DIR
   c_mdfind="$T_STUBS/mdfind"; c_open="$T_STUBS/open"; c_launchctl="$T_STUBS/launchctl"
   c_tccutil="$T_STUBS/tccutil"; c_pbcopy="$T_STUBS/pbcopy"; c_osascript="$T_STUBS/osascript"
-  c_log="$T_STUBS/log"; c_ps=/bin/ps; c_lsof=/usr/sbin/lsof; DENIED_LAST_DEFAULT="1d"; CATCH=0
+  c_log="$T_STUBS/log"; c_ps=/bin/ps; c_lsof=/usr/sbin/lsof; c_id="$T_STUBS/id"; DENIED_LAST_DEFAULT="1d"; CATCH=0; SERVICE_SEL=""
+  eval "$(default_config | grep '^DENIED_SERVICES=')"   # the shipped services, from their one owner
   MDM_OVERRIDES="$T_DIR/MDMOverrides.plist"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
   # shellcheck disable=SC2329  # called through need_root
@@ -1653,6 +1814,8 @@ t_stubs() { # <DIR>
       > "$1/osascript"
     # log logs what it gets and prints the tccd lines a test wrote
     printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/log.log"' 'cat "$T_DIR/tccd.log" 2>/dev/null' 'exit 0' > "$1/log"
+    # id names every user tester
+    printf '%s\n' '#!/bin/sh' 'echo tester' > "$1/id"
   } || exit 1
   chmod 755 "$1"/*
 }
@@ -2033,13 +2196,15 @@ t_list_dates_are_local_time() {
 }
 # One tccd check, its lines as `log show --style compact` prints them; a
 # responsible of "-" leaves its block out, as tccd does for a program started
-# with no parent it attributes it to (ada, 2026-10-31: git as uid 1001).
-t_check() { # <tccd pid> <msgID> <service> <subject> <accessing binary> <authValue> [<time>] [<accessing pid>] [<responsible>]
+# with no parent it attributes it to (ada, 2026-10-31: git as uid 1001). The
+# REQUEST line names the tccd that answers: 0 the system's, N that user's.
+t_check() { # <tccd pid> <msgID> <service> <subject> <accessing binary> <authValue> [<time>] [<accessing pid>] [<responsible>] [<tccd uid>]
   _p="2026-10-25 ${7:-10:01:30}.083 Df tccd[$1:428a401] [com.apple.TCC:access]"
   _r="${9:-$4}"
   if [ "$_r" = "-" ]; then _r=""
   else _r="responsible={TCCDProcess: identifier=com.apple.dash, pid=45618, auid=0, euid=0, responsible_path=$_r, binary_path=$_r}, "; fi
   printf '%s\n' \
+    "$_p REQUEST: tccd_uid=${10:-0}, sender_pid=${2%%.*}, sender_uid=0, sender_auid=-1, function=TCCAccessRequest, msgID=$2" \
     "$_p AUTHREQ_CTX: msgID=$2, function=TCCAccessRequest, service=$3, preflight=yes, query=1, client_dict=(null), daemon_dict=<private>" \
     "$_p AUTHREQ_ATTRIBUTION: msgID=$2, attribution={${_r}accessing={TCCDProcess: identifier=x, pid=${8:-45749}, auid=0, euid=0, binary_path=$5}, requesting={TCCDProcess: identifier=com.apple.sandboxd, pid=186, auid=0, euid=0, binary_path=/usr/libexec/sandboxd}, }," \
     "$_p AUTHREQ_SUBJECT: msgID=$2, subject=$4," \
@@ -2051,9 +2216,9 @@ t_denied_names_the_program_how_often_and_via() {
     t_check 191 186.3 "$SERVICE" /bin/sh /usr/sbin/diskutil 0 10:06:58; } > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
   case "$_o" in *sshd*) t_fail "an allowed check is listed: '$_o'"; return ;; esac
-  case "$_o" in *"/bin/sh  denied[0]  2x  last 2026-10-25 10:06:58  via diskutil  from sh  a shell"*) ;; *) t_fail "got '$_o'"; return ;; esac
+  case "$_o" in *"/bin/sh  SystemPolicyAllFiles  denied[0] reason[5]  tccd system[0]  2x  last 2026-10-25 10:06:58  via diskutil  from sh  a shell"*) ;; *) t_fail "got '$_o'"; return ;; esac
   _o=$(VRB=1 cmd_denied 2>&1)
-  case "$_o" in *"first 2026-10-25 10:00:24  last 2026-10-25 10:06:58  via /usr/sbin/diskutil  from /bin/sh uid 0 pid 45749  a shell"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
+  case "$_o" in *"first 2026-10-25 10:00:24  last 2026-10-25 10:06:58  via /usr/sbin/diskutil  from com.apple.dash /bin/sh uid 0 pid 45749  a shell"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
 }
 # Lines of two checks interleaved, with the SAME msgID from two tccd
 # processes: joined by order or by msgID alone, the denial is pinned on the
@@ -2061,11 +2226,11 @@ t_denied_names_the_program_how_often_and_via() {
 t_denied_joins_checks_by_tccd_and_msgid_not_by_order() {
   t_check 191 186.7 "$SERVICE" /bin/sh /usr/sbin/diskutil 0 > "$T_DIR/a"
   t_check 512 186.7 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2 > "$T_DIR/b"
-  t_check 191 186.8 kTCCServiceSystemPolicyRemovableVolumes /bin/zsh /usr/sbin/diskutil 0 > "$T_DIR/c"
+  t_check 191 186.8 kTCCServiceDeveloperTool /bin/zsh /usr/sbin/diskutil 0 > "$T_DIR/c"
   paste -d '\n' "$T_DIR/a" "$T_DIR/b" "$T_DIR/c" > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
   case "$_o" in *sshd*|*zsh*) t_fail "pinned on the wrong check: '$_o'"; return ;; esac
-  case "$_o" in *"/bin/sh  denied[0]  1x"*"via diskutil"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
+  case "$_o" in *"/bin/sh  SystemPolicyAllFiles  denied[0] reason[5]  tccd system[0]  1x"*"via diskutil"*) t_pass ;; *) t_fail "got '$_o'" ;; esac
 }
 t_denied_says_what_to_do_from_the_grant() {
   t_grant 1 "$T_DIR/bin/tool" 2                        # last_modified 1790000000: 2026-09-21
@@ -2087,8 +2252,8 @@ t_denied_says_what_to_do_from_the_grant() {
 t_denied_none_says_so_with_the_count() {
   t_check 191 1.1 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2 > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
-  if [ "$_o" = " >>> tccd's checks in the system log of the last 1d -- a long window takes a while
-no Full Disk Access refused in the last 1d [tccd checks read: 1]" ]; then t_pass; else t_fail "got '$_o'"; fi
+  if [ "$_o" = " >>> tccd's checks in the system log of the last 1d (services kTCCServiceSystemPolicy*) -- a long window takes a while
+nothing refused in the last 1d (services kTCCServiceSystemPolicy*) [tccd checks read: 1]" ]; then t_pass; else t_fail "got '$_o'"; fi
 }
 # One program refused from an ssh login and from a job with no parent macOS
 # names: two causes, two fixes -- folded into one row, the ssh one would hide
@@ -2122,7 +2287,7 @@ t_denied_catch_shows_the_refused_process_and_its_parents() {
   _l=$(cat "$T_DIR/stub/log.log")
   case "$_l" in "stream "*) ;; *) t_fail "log got '$_l'"; return ;; esac
   case "$_o" in *"pid $_gone ended before it could be looked at"*) ;; *) t_fail "gone: '$_o'"; return ;; esac
-  case "$_o" in *"refused[0]  via /bin/sh  from (none"*"   > $_s $_pp "*"sleep 60"*"   > $_pp "*) ;; *) t_fail "tree: '$_o'"; return ;; esac
+  case "$_o" in *"refused[0] reason[5]  tccd system[0]  via /bin/sh  from (none"*"   > $_s $_pp "*"sleep 60"*"   > $_pp "*) ;; *) t_fail "tree: '$_o'"; return ;; esac
   case "$_o" in *"   > its open files (lsof, while it ran):"*"txt  REG  "*"/sleep"*) ;; *) t_fail "files: '$_o'"; return ;; esac
   case "$_o" in *"  PIPE  "*" PIPE "*) t_fail "a pipe's columns as its name: '$_o'"; return ;; esac
   if [ "$_rc" = "0" ]; then t_pass; else t_fail "rc $_rc"; fi
@@ -2153,6 +2318,99 @@ t_denied_passes_the_window_and_refuses_a_bad_one() {
   case "$_l" in *"--last 2h "*) ;; *) t_fail "log got '$_l'"; return ;; esac
   _o=$( (cmd_denied 2hh) 2>&1); _rc=$?
   case "$_rc|$_o" in 1"|ERROR "*"LAST='2hh'"*) t_pass ;; *) t_fail "rc $_rc '$_o'" ;; esac
+}
+# 2026-11-10 22:49:01, a LaunchDaemon's python3.15 on an external disk: the
+# system tccd said Full Disk Access 0, and the caller's very next request
+# (sandboxd 186, sequence 54036) was the volume, which uid 1001's tccd
+# allowed -- nothing was refused. The REQUEST, CTX, SUBJECT and RESULT lines
+# are as logged; the look that captured them cut each line at 300
+# characters, so the end of the ATTRIBUTION lines (the accessing block) is
+# completed here.
+t_real_probe() { # the lines, in their order
+  _py=/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/bin/python3.15
+  _a="attribution={responsible={TCCDProcess: identifier=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, pid=38634, auid=0, euid=0, responsible_path=$_py, binary_path=$_py}, accessing={TCCDProcess: identifier=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, pid=${1:-38634}, auid=0, euid=0, binary_path=$_py}, requesting={TCCDProcess: identifier=com.apple.sandboxd, pid=186, auid=0, euid=0, binary_path=/usr/libexec/sandboxd}, },"
+  printf '%s\n' \
+    "2026-11-10 22:49:01.944 Df tccd[192:2c561ce] [com.apple.TCC:access] REQUEST: tccd_uid=0, sender_pid=186, sender_uid=0, sender_auid=-1, function=TCCAccessRequest, msgID=186.54035" \
+    "2026-11-10 22:49:01.945 Df tccd[192:2c561ce] [com.apple.TCC:access] AUTHREQ_CTX: msgID=186.54035, function=TCCAccessRequest, service=kTCCServiceSystemPolicyAllFiles, preflight=yes, query=1, client_dict=(null), daemon_dict=<private>" \
+    "2026-11-10 22:49:01.945 Df tccd[192:2c561ce] [com.apple.TCC:access] AUTHREQ_ATTRIBUTION: msgID=186.54035, $_a" \
+    "2026-11-10 22:49:01.947 Df tccd[192:2c561ce] [com.apple.TCC:access] AUTHREQ_SUBJECT: msgID=186.54035, subject=$_py," \
+    "2026-11-10 22:49:01.948 Df tccd[192:2c561ce] [com.apple.TCC:access] AUTHREQ_RESULT: msgID=186.54035, authValue=0, authReason=5, authVersion=1, desired_auth=0, error=(null)," \
+    "2026-11-10 22:49:01.949 Df tccd[1919:2c561cd] [com.apple.TCC:access] REQUEST: tccd_uid=1001, sender_pid=186, sender_uid=0, sender_auid=-1, function=TCCAccessRequest, msgID=${2:-186.54036}" \
+    "2026-11-10 22:49:01.949 Df tccd[1919:2c561cd] [com.apple.TCC:access] AUTHREQ_CTX: msgID=${2:-186.54036}, function=TCCAccessRequest, service=kTCCServiceSystemPolicyRemovableVolumes, preflight=no, query=1, client_dict=(null), daemon_dict=<private>" \
+    "2026-11-10 22:49:01.949 Df tccd[1919:2c561cd] [com.apple.TCC:access] AUTHREQ_ATTRIBUTION: msgID=${2:-186.54036}, $(printf '%s' "$_a" | sed "s/accessing={TCCDProcess: identifier=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, pid=[0-9]*/accessing={TCCDProcess: identifier=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, pid=${3:-38634}/")" \
+    "2026-11-10 22:49:01.951 Df tccd[1919:2c561cd] [com.apple.TCC:access] AUTHREQ_SUBJECT: msgID=${2:-186.54036}, subject=$_py," \
+    "2026-11-10 22:49:01.952 Df tccd[1919:2c561cd] [com.apple.TCC:access] AUTHREQ_RESULT: msgID=${2:-186.54036}, authValue=${4:-2}, authReason=2, authVersion=1, desired_auth=0, error=(null),"
+}
+t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal() {
+  t_real_probe > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"nothing refused in the last 1d"*"; 1 probe(s) a narrower grant then allowed (-V) [tccd checks read: 2]"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  case "$_o" in *python3.15*SystemPolicy*) t_fail "the probe is listed as refused: '$_o'"; return ;; esac
+  _o=$(VRB=1 cmd_denied 2>&1)
+  case "$_o" in *"python3.15  SystemPolicyAllFiles  denied[0] reason[5]  tccd system[0]  1x  first 2026-11-10 22:49:01"*"probe: then SystemPolicyRemovableVolumes allowed[2] reason[2] by tccd tester[1001]"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
+}
+# What is NOT a probe: the next request of another process, a request that
+# is not the very next one, and a narrower check that was refused too --
+# each leaves the Full Disk Access refusal standing, and the last one is a
+# refusal of its own, answered by uid 1001's tccd.
+t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process() {
+  t_real_probe 38634 186.54036 99999 2 > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"python3.15  SystemPolicyAllFiles  denied[0] reason[5]  tccd system[0]  1x"*) ;; *) t_fail "another pid: '$_o'"; return ;; esac
+  t_real_probe 38634 186.54037 38634 2 > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"python3.15  SystemPolicyAllFiles  denied[0] reason[5]  tccd system[0]  1x"*) ;; *) t_fail "a gap: '$_o'"; return ;; esac
+  t_real_probe 38634 186.54036 38634 0 > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"SystemPolicyAllFiles  "*"denied[0] reason[5]"*"tccd system[0]"*) ;; *) t_fail "narrower refused, Full Disk Access: '$_o'"; return ;; esac
+  case "$_o" in *"SystemPolicyRemovableVolumes  denied[0] reason[2]  tccd tester[1001]"*) t_pass ;; *) t_fail "narrower refused: '$_o'" ;; esac
+}
+# MADE UP, in the real line format: no refused volume answer has been seen
+# (a whole day of a LaunchDaemon's had none). One refused by uid 1001's tccd, one
+# Full Disk Access refusal, one check outside the file protections.
+t_three_services() {
+  { t_check 191 1.1 "$SERVICE" "$T_DIR/bin/tool" "$T_DIR/bin/tool" 0
+    t_check 1919 2.1 kTCCServiceSystemPolicyRemovableVolumes "$T_DIR/bin/vol" "$T_DIR/bin/vol" 0 10:01:30 45749 "" 1001
+    t_check 191 3.1 kTCCServiceDeveloperTool "$T_DIR/bin/dev" "$T_DIR/bin/dev" 0; } > "$T_DIR/tccd.log"
+}
+t_denied_selects_the_services() {
+  t_three_services
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"/bin/dev"*) t_fail "default took DeveloperTool: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/tool  SystemPolicyAllFiles  "*) ;; *) t_fail "default, Full Disk Access: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/vol "*"SystemPolicyRemovableVolumes  denied[0] reason[5]  tccd tester[1001]"*"no grant here -> give its job a launcher with Full Disk Access"*"2 refused check(s) from 2 program(s)"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$( (SERVICE_SEL=VOLUMES; cmd_denied) 2>&1)
+  case "$_o" in *"/bin/tool"*|*"/bin/dev"*) t_fail "volumes took another: '$_o'"; return ;; esac
+  case "$_o" in *"(services matching 'VOLUMES')"*"/bin/vol "*) ;; *) t_fail "volumes: '$_o'"; return ;; esac
+  _o=$( (SERVICE_SEL=all; cmd_denied) 2>&1)
+  case "$_o" in *"/bin/dev"*"not a file protection: System Settings > Privacy & Security > DeveloperTool"*"3 refused check(s)"*"(every service)"*) ;; *) t_fail "all: '$_o'"; return ;; esac
+  _o=$("$(self_path)" --service all list 2>&1) && { t_fail "took list: '$_o'"; return; }
+  case "$_o" in *"--service goes with denied"*) t_pass ;; *) t_fail "list: '$_o'" ;; esac
+}
+t_denied_takes_a_program_by_name_or_path() {
+  t_three_services
+  ln -s "$T_DIR/bin" "$T_DIR/linked"
+  _o=$(cmd_denied TOOL 2>&1)
+  case "$_o" in *"/bin/vol"*) t_fail "name took vol: '$_o'"; return ;; esac
+  case "$_o" in *"(services kTCCServiceSystemPolicy*; TOOL only)"*"$T_DIR/bin/tool  "*) ;; *) t_fail "name: '$_o'"; return ;; esac
+  _o=$(cmd_denied "$T_DIR/linked/vol" 2h 2>&1)
+  case "$_o" in *"/bin/tool"*) t_fail "path took tool: '$_o'"; return ;; esac
+  case "$_o" in *"last 2h (services kTCCServiceSystemPolicy*; $T_DIR/bin/vol only)"*"$T_DIR/bin/vol  "*) ;; *) t_fail "path: '$_o'"; return ;; esac
+  _o=$(cmd_denied nothere 2>&1)
+  case "$_o" in *"nothing refused in the last 1d (services kTCCServiceSystemPolicy*; nothere only)"*) ;; *) t_fail "none: '$_o'"; return ;; esac
+  _o=$( (cmd_denied a b) 2>&1); _rc=$?
+  case "$_rc|$_o" in 1"|ERROR "*"two programs"*) t_pass ;; *) t_fail "two: rc $_rc '$_o'" ;; esac
+}
+# A LaunchDaemon has no Full Disk Access: the grants cannot be read, the
+# log can -- the refusals still come, and the reason the grants are missing
+# is said once.
+t_denied_reports_without_the_grants() {
+  t_three_services
+  chmod 000 "$TCC_DB"
+  _o=$(cmd_denied 2>&1); _rc=$?
+  chmod 600 "$TCC_DB"
+  case "$_o" in *"    > grants not read (ERROR "*"cannot read"*") -- what to do is from the log alone"*"/bin/vol "*"2 refused check(s)"*) ;; *) t_fail "got '$_o'"; return ;; esac
+  if [ "$_rc" = "0" ]; then t_pass; else t_fail "rc $_rc"; fi
 }
 t_add_finds_a_grant_under_its_real_path() {
   ln -s "$T_DIR/bin" "$T_DIR/linked"
@@ -2566,6 +2824,8 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_denied_passes_the_window_and_refuses_a_bad_one t_denied_tells_an_ssh_login_from_a_job_with_no_parent \
     t_denied_catch_shows_the_refused_process_and_its_parents t_denied_catch_takes_no_window_and_goes_with_denied_only \
     t_list_points_a_refused_tool_at_its_job_not_at_remove \
+    t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process \
+    t_denied_selects_the_services t_denied_takes_a_program_by_name_or_path t_denied_reports_without_the_grants \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \
                 t_launcher_is_readable_and_run_by_root_only \
                 t_as_root_open_runs_in_the_screen_users_session \
@@ -2646,20 +2906,22 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00098 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00099 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
-    --user)           [ "$_n" -ge 1 ] || err 00099 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --user)           [ "$_n" -ge 1 ] || err 00100 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --user=*)         USER_ARG="${_a#--user=}" ;;
-    --group)          [ "$_n" -ge 1 ] || err 00100 "--group needs a group name"; GROUP_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --group)          [ "$_n" -ge 1 ] || err 00101 "--group needs a group name"; GROUP_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --group=*)        GROUP_ARG="${_a#--group=}" ;;
     --recommended)    RECOMMENDED=1 ;;
     --catch)          CATCH=1 ;;
+    --service)        [ "$_n" -ge 1 ] || err 00102 "--service needs a service: a part of its name (RemovableVolumes), or all"; SERVICE_SEL="$1"; shift; _n=$((_n - 1)) ;;
+    --service=*)      SERVICE_SEL="${_a#--service=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
     --list|--denied|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00101 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00102 "unknown option '$_a' (--help)" ;;
+                      err 00103 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00104 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -2668,18 +2930,19 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|denied|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00103 "no such command; you mean \`$US remove\`" ;;
+  rm)  err 00105 "no such command; you mean \`$US remove\`" ;;
   "")  usage 1>&2; exit 1 ;;
-  *)   err 00104 "unknown command '$CMD' (--help)" ;;
+  *)   err 00106 "unknown command '$CMD' (--help)" ;;
 esac
-[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00105 "--user goes with create -- the user a new launcher runs its target as"
-[ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00106 "--group goes with create -- with --user, the primary group a new launcher takes"
-[ "$CATCH" = "0" ] || [ "$CMD" = denied ] || err 00107 "--catch goes with denied -- it waits for the next program refused Full Disk Access"
-[ "$RECOMMENDED" = "0" ] || [ "$CMD" = remove ] || err 00108 "--recommended goes with remove -- the grants '$US list' marks '$TO_REMOVE'"
+[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00107 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00108 "--group goes with create -- with --user, the primary group a new launcher takes"
+[ "$CATCH" = "0" ] || [ "$CMD" = denied ] || err 00109 "--catch goes with denied -- it waits for the next refused check"
+[ -z "$SERVICE_SEL" ] || [ "$CMD" = denied ] || err 00110 "--service goes with denied -- the TCC services whose refusals it reports"
+[ "$RECOMMENDED" = "0" ] || [ "$CMD" = remove ] || err 00111 "--recommended goes with remove -- the grants '$US list' marks '$TO_REMOVE'"
 
 need_root
 load_config
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00109 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00112 "mktemp failed"
 interrupt_traps
 
 case "$CMD" in

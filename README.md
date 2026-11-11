@@ -74,8 +74,10 @@ grant.
 ## Commands
 
     my-fda list                       every grant: an ID, the client, allowed/denied, what to do
-    my-fda denied [<LAST>]            every program refused Full Disk Access in the system log (default: the last 1d)
-    my-fda denied --catch             waits for the next refusal: the refused process, its parents, its open files
+    my-fda denied [<PROGRAM>] [<LAST>] [--service <SERVICE>|all]
+                                      every file check macOS refused, from the system log (default: the last 1d)
+    my-fda denied --catch [<PROGRAM>] [--service <SERVICE>|all]
+                                      waits for the next refusal: the refused process, its parents, its open files
     my-fda add <PATH>                 "+": lists PATH switched OFF, opens the pane -- you switch it on -- checks it
     my-fda remove <ID>...             "-": shows what it would take away
     my-fda remove go <ID>...          ...and takes it away
@@ -99,12 +101,17 @@ selection goes through the pipe `list` is made for:
     my-fda list | grep 'denied\[0\]' | cut -f 1 | my-fda remove go     # acts
 
 - **denied** finds the jobs that need a grant or a launcher: a job refused
-  Full Disk Access just fails, often with a misleading error, and only
-  tccd's lines in the system log say so. One line per program, as a grant
-  names it, with how often, when last, the binary that touched the file
-  (`via`), the process macOS held responsible for it (`from`), and what to
-  do -- `/bin/dash ... via /usr/sbin/diskutil  from dash  a shell` is a root
-  shell script running diskutil, and needs a launcher. `from
+  a file protection just fails, often with a misleading error ("Operation
+  not permitted"), and only tccd's lines in the system log say so. One line
+  per program, service, answer and tccd: the program as a grant names it,
+  the service (`SystemPolicyAllFiles` -- Full Disk Access --,
+  `SystemPolicyRemovableVolumes`, ...), the answer with its raw values
+  (`denied[0] reason[5]`: authValue, authReason), the tccd that answered
+  (`system[0]`, or a user's, `alice[501]`: a volume or folder grant is that
+  user's), how often, when last, the binary that touched the file (`via`),
+  the process macOS held responsible for it (`from`), and what to do --
+  `/bin/dash  SystemPolicyAllFiles ... via diskutil  from dash  a shell` is
+  a root shell script running diskutil, and needs a launcher. `from
   sshd-keygen-wrapper` is an ssh login: Remote Login passes no Full Disk
   Access on unless System Settings > General > Sharing > Remote Login (i)
   allows it for remote users. `from -` is a program started with no parent
@@ -112,6 +119,24 @@ selection goes through the pipe `list` is made for:
   who, so `denied --catch` waits for the next refusal and shows the process,
   its parents and its open files while it still runs -- tccd names no file
   either, and what the process has open is the nearest there is.
+- **A probe is not a refusal.** For a file, macOS asks Full Disk Access
+  first and, when that is not allowed, the narrower protection in the
+  caller's very next request (its msgID is `<caller pid>.<sequence>`,
+  whichever tccd answers). When that one is allowed for the same process,
+  within a second, nothing was refused: `denied` counts such probes in its
+  summary and shows them with `-V`. Over one observed day, a LaunchDaemon's
+  python3.15 got Full Disk Access 0 120 times and its external volume
+  allowed 196 times, by the console user's tccd -- no refusal at all.
+- **Which checks:** PROGRAM is a name (`git`), matched ignoring case against
+  the program, `via` and `from`, or a path, matched with its links followed;
+  a LAST starts with a digit (`30m`, `2h`, `3d`) or is `boot`. By default
+  the services in `DENIED_SERVICES` (`kTCCServiceSystemPolicy*`: the file
+  and folder protections); `--service <SERVICE>` every service whose name
+  holds SERVICE, ignoring case (`volumes`, `Camera`), `--service all` every
+  one.
+- **Without Full Disk Access** -- a LaunchDaemon's run -- `denied` still
+  reads the log; the grants it cannot read are named in one line, and what
+  to do is then from the log alone. `-Q` prints the lines alone.
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.
 - **A path is granted as its real path:** macOS records the file with its
