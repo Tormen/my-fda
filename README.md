@@ -69,7 +69,7 @@ grant.
   grant stays a person's act. Where TCC.db cannot be written, it puts the
   path on the clipboard for +, Cmd-Shift-G, Cmd-V, or offers a drag into the
   list -- but only for a program the screen's user can execute: the pane
-  loses any other one dragged in, without an error (ada, macOS 27).
+  loses any other one dragged in, without an error (macOS 27).
 
 ## Commands
 
@@ -157,7 +157,7 @@ selection goes through the pipe `list` is made for:
   by a TAB -- `cut -f 1` returns them.
 - **A path is granted as its real path:** macOS records the file with its
   symlinks resolved, so `add` resolves PATH first and says so when it
-  differs (`/LINKS/local/sbin/x is /Users/.../local/sbin/x`); `list` shows
+  differs (`/opt/tools/sbin/x is /Volumes/Data/tools/sbin/x`); `list` shows
   that real path, which is what to `grep` for.
 - **Changes** start with a backup (`sqlite3 .backup` into `BACKUP_DIR`,
   never `cp` -- tccd holds the file open). Each grant then goes the one way
@@ -170,8 +170,8 @@ selection goes through the pipe `list` is made for:
   once: the pane does not show it either, and it applies to nothing --
   `list` says so too (`GONE: stays`, not `-> remove`). Then
   the grants are read again, and anything else still there is an error.
-  Even root with Full Disk Access may be refused a write (macOS 26 on
-  macado); the probe for it must really write, since sqlite opens such a
+  Even root with Full Disk Access may be refused a write (macOS
+  26); the probe for it must really write, since sqlite opens such a
   file read-only without a word. As root, the pane and Finder open in the
   session of the user at the screen (`launchctl asuser`): plain `open`
   from root is refused.
@@ -223,7 +223,7 @@ into one block per core, each numbered by its place in the list, a block
 that dies leaving its tests `not ok`. The stub commands are written once per
 run -- macOS checks every new executable on its first run, through a service
 all blocks share, and fresh stubs per test made them queue there. The 86
-tests of 2026-10-26: 22.7 s one by one, 3.4 s now (horse, 16 cores), the same results.
+tests of 2026-10-26: 22.7 s one by one, 3.4 s now (16 cores), the same results.
 
 Ctrl-C is tested with a real SIGINT, sent while a removal waits for its
 Return: exit 130, one line on stderr naming where it stopped, nothing after

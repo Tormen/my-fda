@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="3e34c57"
-SCRIPT_RELEASE="v0.2-7-g3e34c57"
+SCRIPT_COMMIT="7c44a3d"
+SCRIPT_RELEASE="v0.2-8-g7c44a3d"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -54,7 +54,7 @@ need_root() {
   exit 1
 }
 
-# The real file behind $0 -- /LINKS/sbin/my-fda is a link or a copy.
+# The real file behind $0 -- the installed my-fda may be a link or a copy.
 self_path() {
   _p="$0"
   while [ -L "$_p" ]; do
@@ -64,7 +64,7 @@ self_path() {
   printf '%s\n' "$_p"
 }
 # PATH as macOS records it in a grant: its own links and its directories
-# followed -- /LINKS/local/sbin/x is granted as /Users/.../local/sbin/x
+# followed -- /opt/tools/sbin/x is granted as /Volumes/Data/tools/sbin/x
 real_path() { # <PATH>
   _rp=$1
   while [ -L "$_rp" ]; do
@@ -621,7 +621,7 @@ backup_tcc() {
 }
 
 # Can this process write TCC.db? Not everywhere, even as root with Full Disk
-# Access (macado refused it). The probe must WRITE: sqlite opens a file it
+# Access (macOS 26 refused it). The probe must WRITE: sqlite opens a file it
 # may not write read-only without a word, and `BEGIN IMMEDIATE; ROLLBACK`
 # alone still succeeds then -- a DELETE of nothing is refused. The answer,
 # or sqlite's refusal, is left in $WORK/probe.
@@ -682,14 +682,14 @@ take_away() { # <FILE>
   STAYS=$(wc -l < "$WORK/stays" | tr -d ' ')
   still_there "$1" > "$WORK/still"
   # FILENAME, not NR == FNR: no grant STAYS (the usual case) made "still there"
-  # read as "remaining 0" -- ada, 2026-10-05: the rsync asked for was counted gone
+  # read as "remaining 0" -- 2026-10-05: the rsync asked for was counted gone
   awk -F '\t' 'FILENAME == ARGV[1] { k[$1] = 1; next } !($1 in k)' "$WORK/stays" "$WORK/still" > "$WORK/left"
   REMAINING=$(wc -l < "$WORK/left" | tr -d ' ')
   [ "$_hand" = "1" ] && VIA_HAND=$(( $(wc -l < "$WORK/byhand" | tr -d ' ') - REMAINING ))
   TAKEN=$((VIA_TCC + VIA_SQL + VIA_HAND))
   TOOK="[tccutil $VIA_TCC, sqlite $VIA_SQL, by hand $VIA_HAND, stay $STAYS; remaining $REMAINING]"
   # a grant that went although it was not asked for: by hand, the wrong row is
-  # one click away (ada, 2026-10-05: My-dl-helper went, the rsync asked for stayed)
+  # one click away (2026-10-05: a helper went, the rsync asked for stayed)
   awk -F '\t' 'FILENAME == ARGV[1] { a[$1] = 1; next } FILENAME == ARGV[2] { k[$1] = 1; next } !($1 in a) && !($1 in k)' \
     "$WORK/after" "$1" "$WORK/before" > "$WORK/other"
   if [ -s "$WORK/other" ]; then
@@ -706,7 +706,7 @@ take_away() { # <FILE>
 
 # Open something on the screen. Root's shell is outside the GUI session, and
 # macOS refuses to launch an app from there (`open` failed with launchd's
-# "Domain does not support specified action", macado 2026-10-04), so as root
+# "Domain does not support specified action", macOS 26, 2026-10-04), so as root
 # it runs inside the session of the user at the screen: the owner of
 # /dev/console.
 # Run a command in the session of the user at the screen -- where the pane,
@@ -749,7 +749,7 @@ pane_names() {
 # The rest of the hand removal: open the pane, then wait at the keyboard.
 # Is someone at a terminal to press Return? Asked of the terminal itself, not
 # of stdin: `my-fda list | ... | my-fda remove go` has its IDs on stdin and
-# still a person in front of it (ada, 2026-10-27: a step piping the IDs skipped
+# still a person in front of it (2026-10-27: a step piping the IDs skipped
 # the wait, and the grants taken away by hand counted as still there).
 # In a subshell: a failed redirection on : (a special builtin) ends dash itself.
 have_tty() { ( : < "$TTY" ) 2> /dev/null; }
@@ -913,7 +913,7 @@ cmd_add() { # <PATH>
     gui_open -R "$_p" || err 00042 "could not show '$_p' in Finder"
     say " >>> Full Disk Access is open, and $_p is selected in Finder (TCC.db cannot be written here):"
     # The pane silently loses a dragged-in program the screen's user cannot
-    # execute (ada, macOS 27, 2026-10-26: 744 lost, 755 taken); + takes it.
+    # execute (macOS 27, 2026-10-26: 744 lost, 755 taken); + takes it.
     if printf '%s' "$_p" | as_screen_user "$c_pbcopy" > /dev/null 2>&1; then
       _plus="+, then Cmd-Shift-G, Cmd-V, Return -- the path is on the clipboard"
     else
@@ -1607,7 +1607,7 @@ group_of() { # <launcher>
 
 # Where launcher <NAME> lives. No dot in its name: macOS takes what follows a
 # dot for an extension, files the launcher as a Document, and the Full Disk
-# Access pane then refuses it, dragged in or chosen with + (ada, 2026-10-22).
+# Access pane then refuses it, dragged in or chosen with + (2026-10-22).
 launcher_path() { # <NAME>
   printf '%s/my-fda-%s\n' "$HELPER_DIR" "$1"
 }
@@ -1692,13 +1692,13 @@ cmd_create() { # [NAME] <TARGET>
   [ "$(group_of "$WORK/launcher")" = "$GROUP_ARG" ] \
     || err 00087 "the built launcher does not carry its group marker ($GROUP_ARG) -- not installed"
   # cc only linker-signs, under the temp file's name: the Full Disk Access
-  # pane takes such a file with + but loses it when dragged in (ada,
-  # 2026-10-26). A real ad-hoc signature under its own name, as my-tm signs
-  # my-tm-launcher, is dragged in like any other program.
+  # pane takes such a file with + but loses it when dragged in (macOS 27,
+  # 2026-10-26). A program with a real ad-hoc signature under its own name
+  # is dragged in like any other program.
   run "$c_codesign" -s - -f -o runtime -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
     || err 00088 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
   # 755: System Settings, running as the screen's user, loses a dragged-in
-  # program that user cannot execute (ada, 2026-10-26); the launcher itself
+  # program that user cannot execute (2026-10-26); the launcher itself
   # refuses to run as anyone but root, so executing it grants nothing
   if [ "$(id -u)" = "0" ]; then run install -m 755 -o root -g wheel "$WORK/launcher" "$_l"
   else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00089 "cannot install '$_l'"
@@ -1957,7 +1957,7 @@ t_world() {
 }
 # The stub commands, written ONCE per run into <DIR>: macOS checks every NEW
 # executable on its first run, through a service all blocks share (100 ms
-# against 5 ms for one already run, horse 2026-10-26) -- eight fresh stubs per
+# against 5 ms for one already run, 2026-10-26) -- eight fresh stubs per
 # test made the blocks queue there. Each stub finds the test's own directory
 # in $T_DIR when it RUNS, and logs into $T_DIR/stub.
 t_stubs() { # <DIR>
@@ -1972,7 +1972,7 @@ t_stubs() { # <DIR>
     printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/open.log"' > "$1/open"
     printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/launchctl.log"' \
       '[ "$1" = asuser ] && { shift 2; exec "$@"; }' 'exit 0' > "$1/launchctl"
-    # tccutil as macado showed it: it knows installed apps only (rc 64 for any
+    # tccutil as macOS 26 showed it: it knows installed apps only (rc 64 for any
     # other id); with no id it takes every grant of the service
     printf '%s\n' '#!/bin/sh' 'echo "$*" >> "$T_DIR/stub/tccutil.log"' \
       '[ "$1" = reset ] && [ "$2" = SystemPolicyAllFiles ] || exit 64' \
@@ -2041,7 +2041,7 @@ t_general_tool_homebrew_and_script_are_flagged() {
   printf '#!/bin/dash\n' > "$T_DIR/tools/job"
   : > "$T_DIR/Cellar/x"
   _bad=""
-  for _f in curl python3.14 git; do   # git: ada, 2026-10-29 -- a git row switched off hung every git on an external volume
+  for _f in curl python3.14 git; do   # git: 2026-10-29 -- a git row switched off hung every git on an external volume
     case "$(t_row 1 "$T_DIR/tools/$_f" 2 | t_note_of)" in "a general tool"*"remove"*) ;; *) _bad="$_bad $_f" ;; esac
   done
   case "$(t_row 1 "$T_DIR/tools/job" 2 | t_note_of)" in "a script"*) ;; *) _bad="$_bad script" ;; esac
@@ -2143,7 +2143,7 @@ t_gone_app_falls_back_to_sqlite() {
      && case "$_o" in *"[tccutil 0, sqlite 1, by hand 0, stay 0; remaining 0]"*) true ;; *) false ;; esac
   then t_pass; else t_fail "count $(t_count) tccutil '$_log', '$_o'"; fi
 }
-# The ada case: IDs on stdin from a pipe, TCC.db read-only, a person at the
+# The case seen: IDs on stdin from a pipe, TCC.db read-only, a person at the
 # terminal -- the wait must still come, reading its Return from the terminal.
 t_guided_removal_waits_though_the_ids_come_from_a_pipe() {
   [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
@@ -2249,7 +2249,7 @@ t_list_says_what_remove_does_for_a_gone_app() {
   [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
   # list's '-> remove' is what `list | grep -- '-> remove' | cut -f 1 | remove go`
   # acts on; where remove can only say "these stay", list said '-> remove' all the
-  # same, and a check counting those never passed (horse and ada, 2026-10-28)
+  # same, and a check counting those never passed (on two machines, 2026-10-28)
   t_grant 0 com.vanished.app
   _w=$(QUIET=1 cmd_list | awk -F '\t' '/com.vanished.app/ { print $NF }')
   chmod 444 "$TCC_DB"
@@ -2369,7 +2369,7 @@ t_list_dates_are_local_time() {
 }
 # One tccd check, its lines as `log show --style compact` prints them; a
 # responsible of "-" leaves its block out, as tccd does for a program started
-# with no parent it attributes it to (ada, 2026-10-31: git as uid 1001). The
+# with no parent it attributes it to (2026-10-31: git as uid 1001). The
 # REQUEST line names the tccd that answers: 0 the system's, N that user's.
 t_check() { # <tccd pid> <msgID> <service> <subject> <accessing binary> <authValue> [<time>] [<accessing pid>] [<responsible>] [<tccd uid>]
   _p="2026-10-25 ${7:-10:01:30}.083 Df tccd[$1:428a401] [com.apple.TCC:access]"
@@ -2430,7 +2430,7 @@ nothing refused in the last 1d (services kTCCServiceSystemPolicy*) [tccd checks 
 }
 # One program refused from an ssh login and from a job with no parent macOS
 # names: two causes, two fixes -- folded into one row, the ssh one would hide
-# the job (ada, 2026-10-31: git, refused from root's ssh during my-rollout go
+# the job (2026-10-31: git, refused from root's ssh during a deploy run
 # and as uid 1001 every few minutes).
 t_denied_tells_an_ssh_login_from_a_job_with_no_parent() {
   _g="$T_DIR/Cellar/rsync/3.5.1/bin/rsync"
@@ -2449,7 +2449,7 @@ t_denied_catch_shows_the_refused_process_and_its_parents() {
   # shellcheck disable=SC2216  # the pipe is the point: lsof must show one, with no NODE column
   : | sleep 60 & _s=$!
   _pp=$(ps -o ppid= -p "$_s" | tr -d ' ')
-  # ps pads a short ppid after a long pid (ada: "13644  9421 me"): padded on
+  # ps pads a short ppid after a long pid ("13644  9421 alice"): padded on
   # purpose here, so the test sees that spacing on every machine
   printf '%s\n' '#!/bin/sh' '/bin/ps "$@" | sed "s/^ *\([0-9][0-9]*\)  */  \1     /"' > "$T_DIR/padded-ps"
   chmod 755 "$T_DIR/padded-ps"; c_ps="$T_DIR/padded-ps"
@@ -2472,7 +2472,7 @@ t_denied_catch_takes_no_window_and_goes_with_denied_only() {
   case "$_o" in *"--catch goes with denied"*) t_pass ;; *) t_fail "list: '$_o'" ;; esac
 }
 # A general tool switched OFF grants nothing: macOS wrote the row when it
-# refused it and writes it back at the next refusal (ada, 2026-10-31: git's
+# refused it and writes it back at the next refusal (2026-10-31: git's
 # row was back at 19:38:11, minutes after it was taken away). list points at
 # the job, not at the row -- and remove --recommended leaves it.
 t_list_points_a_refused_tool_at_its_job_not_at_remove() {
@@ -2690,7 +2690,7 @@ t_app() { # <name> <bundle id>
   printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' '<plist version="1.0"><dict>' \
     "<key>CFBundleIdentifier</key><string>$2</string>" '</dict></plist>' > "$T_DIR/$1.app/Contents/Info.plist"
 }
-# The ada case: switched on in the pane, recorded under the app's id -- a
+# The case seen: switched on in the pane, recorded under the app's id -- a
 # look for the PATH says "not allowed yet" for a grant that is there.
 t_add_an_app_finds_its_grant_by_bundle_id() {
   t_app Foo com.test.foo; t_grant 0 com.test.foo 2
