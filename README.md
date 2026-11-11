@@ -74,7 +74,7 @@ grant.
 ## Commands
 
     my-fda list                       every grant: an ID, the client, allowed/denied, what to do
-    my-fda denied [<PROGRAM>] [<LAST> | --since <TIME>] [--service <SERVICE>|all]
+    my-fda denied [<PROGRAM>] [<LAST> | --since <TIME> [--until <TIME>]] [--service <SERVICE>|all]
                                       every file check macOS refused, from the system log (default: the last 1d)
     my-fda denied --catch [<PROGRAM>] [--service <SERVICE>|all]
                                       waits for the next refusal: the refused process, its parents, its open files
@@ -148,7 +148,9 @@ selection goes through the pipe `list` is made for:
   a LAST starts with a digit (`30m`, `2h`, `3d`) or is `boot`; instead of
   a LAST, `--since '2026-11-12 08:15:00'` reads from that local time to now,
   however long ago -- so a caller that reads window after window asks each
-  from where the last one ended, with no gap and no overlap. By default
+  from where the last one ended, with no gap and no overlap; `--until
+  '<TIME>'` ends it at a time the caller took before it asked, where its
+  next window starts (only with `--since`, and not before it). By default
   the services in `DENIED_SERVICES` (`kTCCServiceSystemPolicy*`: the file
   and folder protections); `--service <SERVICE>` every service whose name
   holds SERVICE, ignoring case (`volumes`, `Camera`), `--service all` every
