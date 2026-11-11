@@ -127,6 +127,22 @@ selection goes through the pipe `list` is made for:
   summary and shows them with `-V`. Over one observed day, a LaunchDaemon's
   python3.15 got Full Disk Access 0 120 times and its external volume
   allowed 196 times, by the console user's tccd -- no refusal at all.
+- **A refusal tccd never answered.** When tccd cannot reach the tccd it
+  forwards to (`XPC forwardMessage error: Connection invalid`), or
+  sandboxd's request fails (`missing 'auth_value' in reply message`), there
+  is no answer in tccd's lines -- the kernel refuses: `System Policy:
+  touch(4717) deny(1) file-write-create /private/etc/x`. `denied` lists each
+  such kernel line: the process (the kernel names no path), the service and
+  the reason from a failure in the second before it, `no answer[<why>]`,
+  `from` the program tccd was asked about, the operation and the path:
+
+      touch  SystemPolicySysAdminFiles  no answer[Connection invalid]  tccd system[0]  1x  last ...  via touch  from python3[18476]  file-write-create /private/etc/x -> ...
+
+  With no failure in that second, the service is `?` and the reason `none
+  seen`; with two failures of different services in it, the service is `?`
+  too -- never a guess. The kernel's side of a refusal tccd answered is not
+  listed twice. Its `Sandbox: ...` lines are other sandboxes' and are left
+  out.
 - **Which checks:** PROGRAM is a name (`git`), matched ignoring case against
   the program, `via` and `from`, or a path, matched with its links followed;
   a LAST starts with a digit (`30m`, `2h`, `3d`) or is `boot`. By default

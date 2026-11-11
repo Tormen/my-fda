@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="1b1f891"
-SCRIPT_RELEASE="v0.2-6-g1b1f891"
+SCRIPT_COMMIT="3e34c57"
+SCRIPT_RELEASE="v0.2-7-g3e34c57"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -194,7 +194,10 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 to do. A refusal from an ssh login names Remote Login's own
                 switch. A Full Disk Access probe that a narrower grant (the
                 volume, the folder) allowed right after refused nothing: it
-                is counted, -V shows it.
+                is counted, -V shows it. A check tccd could not answer (it
+                could not reach the tccd it forwards to) is the kernel's
+                refusal: no answer[why], the operation and the path, and
+                from: the program tccd was asked about.
                 PROGRAM: a name (git) matches the program, via or from,
                 ignoring case; a path matches that file, its links
                 followed. A LAST starts with a digit, or is boot.
@@ -1062,7 +1065,13 @@ cmd_reset() { # [go]
 # responsible) and AUTHREQ_RESULT (authValue, authReason). A msgID is unique
 # only within one tccd process, and the lines of checks in flight
 # interleave: they are joined by tccd pid + msgID, never by order.
-TCCD_PREDICATE='process == "tccd" AND (eventMessage BEGINSWITH "REQUEST:" OR eventMessage BEGINSWITH "AUTHREQ_CTX" OR eventMessage BEGINSWITH "AUTHREQ_SUBJECT" OR eventMessage BEGINSWITH "AUTHREQ_ATTRIBUTION" OR eventMessage BEGINSWITH "AUTHREQ_RESULT")'
+# A check tccd could not answer has no AUTHREQ_RESULT: tccd logs
+# "forwardMessage error" (it could not reach the tccd it forwards to), or
+# sandboxd logs "tcc_server_message_request_authorization(<service>)
+# failed", and the kernel then refuses -- "System Policy: <process>(<pid>)
+# deny(1) <operation> <path>". Its "Sandbox: ..." lines are other sandboxes'
+# and stay out.
+REFUSAL_PREDICATE='(process == "tccd" AND (eventMessage BEGINSWITH "REQUEST:" OR eventMessage BEGINSWITH "AUTHREQ_CTX" OR eventMessage BEGINSWITH "AUTHREQ_SUBJECT" OR eventMessage BEGINSWITH "AUTHREQ_ATTRIBUTION" OR eventMessage BEGINSWITH "AUTHREQ_RESULT" OR eventMessage CONTAINS "forwardMessage error")) OR (process == "sandboxd" AND eventMessage BEGINSWITH "tcc_server_message_request_authorization(") OR (process == "kernel" AND eventMessage CONTAINS "System Policy: ")'
 
 # What denied reads, in words -- the services and the program -- and the
 # program as it is matched: a path as macOS records it, its links followed.
@@ -1081,9 +1090,11 @@ refusal_scope() { # [PROGRAM]
 # `log show --style compact` lines on stdin -> one line per check that was
 # not allowed, of the services denied selects and the program it was given:
 # date time, client, authValue, via, responsible, pid, uid, service,
-# authReason, tccd, the responsible's TCC identifier, refused|probe, and for
-# a probe the check that followed it (service, authValue, authReason,
-# tccd), TAB-separated. via and pid are the process that touched the file,
+# authReason, tccd, the responsible's TCC identifier, refused|probe|noanswer,
+# and then for a probe the check that followed it (service, authValue,
+# authReason, tccd), for a noanswer the operation, the path, why there was
+# no answer, and the program tccd was asked about (identifier[pid] or "-"),
+# TAB-separated. via and pid are the process that touched the file,
 # responsible the one macOS held responsible for it ("-": none, the program
 # was started with no parent macOS attributes it to); tccd is "system[0]"
 # or a user's, "alice[501]".
@@ -1144,7 +1155,9 @@ refusals() { # [catch] [PROGRAM]
       return tn[x]
     }
     function wanted(i) {               # of the services selected, and of the program
-      if (selmode == "set" && SV[i] !~ setre) return 0
+      # a refusal whose service is unknown ("") is still a refusal: only
+      # --service <part>, which asks for one service, leaves it out
+      if (selmode == "set" && SV[i] != "" && SV[i] !~ setre) return 0
       if (selmode == "part" && index(tolower(SV[i]), lsel) == 0) return 0
       if (prog == "") return 1
       if (progpath) return (CL[i] == prog || VV[i] == prog || RR[i] == prog)
@@ -1182,16 +1195,23 @@ refusals() { # [catch] [PROGRAM]
       if (c > 0) files(PD[i])
       cap[i] = buf; ct[i] = c
     }
-    function emit(i, kind, j) {
+    function emit(i, kind, j,   d1, d2, d3, d4) {
       if (!wanted(i)) return
       if (catch == "") {
+        d1 = d2 = d3 = d4 = "-"
+        if (j > 0) { d1 = SV[j]; d2 = AV[j]; d3 = AR[j]; d4 = TU[j] }
+        if (kind == "noanswer") { d1 = OP[i]; d2 = PA[i]; d3 = WY[i]; d4 = IDN[i] }
         printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", T[i], CL[i], AV[i], VV[i], RR[i], PD[i], UU[i],
-          SV[i], AR[i], TU[i], IDN[i], kind, (j > 0 ? SV[j] : "-"), (j > 0 ? AV[j] : "-"), (j > 0 ? AR[j] : "-"), (j > 0 ? TU[j] : "-")
+          SV[i], AR[i], TU[i], IDN[i], kind, d1, d2, d3, d4
         return
       }
       if (kind == "probe") return
-      printf "%s  %s  %s  refused[%s] reason[%s]  tccd %s  via %s  from %s  uid %s  pid %s\n", T[i], CL[i], short(SV[i]), AV[i], AR[i], TU[i],
-        VV[i], (RR[i] == "-" ? "(none: started with no parent macOS attributes it to)" : RR[i]), UU[i], PD[i]
+      if (kind == "noanswer")
+        printf "%s  %s  %s  no answer[%s]  tccd %s  %s %s  for %s  pid %s\n", T[i], CL[i], (SV[i] == "" ? "?" : short(SV[i])), WY[i], TU[i],
+          OP[i], PA[i], IDN[i], PD[i]
+      else
+        printf "%s  %s  %s  refused[%s] reason[%s]  tccd %s  via %s  from %s  uid %s  pid %s\n", T[i], CL[i], short(SV[i]), AV[i], AR[i], TU[i],
+          VV[i], (RR[i] == "-" ? "(none: started with no parent macOS attributes it to)" : RR[i]), UU[i], PD[i]
       if (ct[i] > 0) { printf "%s", cap[i]; done = 1; exit }
       print "   > pid " PD[i] " ended before it could be looked at -- waiting for the next refusal"
       fflush()
@@ -1199,8 +1219,55 @@ refusals() { # [catch] [PROGRAM]
     function forget(i) {
       delete T[i]; delete D[i]; delete SS[i]; delete SN[i]; delete SQ[i]; delete CL[i]; delete AV[i]; delete AR[i]
       delete VV[i]; delete RR[i]; delete PD[i]; delete UU[i]; delete SV[i]; delete TU[i]; delete IDN[i]; delete cap[i]; delete ct[i]
+      delete OP[i]; delete PA[i]; delete WY[i]
     }
-    $6 == "REQUEST:"             { u[key()] = field("tccd_uid", $0) }
+    function failed(sv, why, tg, tu,   t) {   # a check tccd could not answer, at the moment it failed
+      t = secs($2)
+      # two failures for different services within a second: which one a
+      # kernel refusal right after belongs to cannot be told
+      fa = (fd == $1 && t - ft <= 1 && fsv != sv) ? 1 : 0
+      fd = $1; ft = t; fsv = sv; fwhy = why; ftg = tg; ftu = tu
+    }
+    $4 ~ /^tccd\[/ && index($0, "forwardMessage error: ") {
+      w = $0; sub(/.*forwardMessage error: /, "", w); sub(/\. \(service=.*/, "", w)
+      p = $4; sub(/^tccd\[/, "", p); sub(/:.*/, "", p)
+      failed(field("service", $0), w, field("target_id", $0) "[" field("target_pid", $0) "]", (p in tpu ? tname(tpu[p]) : "?"))
+      next
+    }
+    $4 ~ /^sandboxd\[/ && index($0, "tcc_server_message_request_authorization(") {
+      sv = $0; sub(/.*request_authorization\(/, "", sv); sub(/\).*/, "", sv)
+      if (fd == $1 && secs($2) - ft <= 1 && fsv == sv) next   # the failure tccd named already, with its reason and target
+      w = $0; sub(/.*Code=[0-9]+ "/, "", w); sub(/".*/, "", w)
+      failed(sv, w, "-", "?")
+      next
+    }
+    # The kernel refusing: paired with a failure of the second before it --
+    # the kernel line names no service, the failure no path -- or, with
+    # none, the kernel side of a refusal tccd answered (left out: that
+    # answer is the line), or a refusal with no answer seen at all.
+    $4 ~ /^kernel\[/ && index($0, "System Policy: ") {
+      x = $0; sub(/.*System Policy: /, "", x)
+      if (x !~ /^[^(]+\([0-9]+\) deny\(/) next
+      pr = x; sub(/\(.*/, "", pr); kp = x; sub(/^[^(]*\(/, "", kp); sub(/\).*/, "", kp)
+      x = substr(x, index(x, ") deny(") + 2); sub(/^deny\([0-9]+\) /, "", x)
+      op = x; sub(/ .*/, "", op); pa = x; sub(/^[^ ]+ ?/, "", pa)
+      dup = 1; if (match($0, /[0-9]+ duplicate reports for System Policy: /)) dup = substr($0, RSTART, RLENGTH) + 0
+      t = secs($2)
+      if (fd == $1 && t - ft >= 0 && t - ft <= 1) { sv = (fa ? "" : fsv); w = fwhy; tg = ftg; tu = ftu }
+      else if ((kp in rec) && rec[kp] == $1 && t - rsec[kp] <= 1) next
+      else { sv = ""; w = "none seen"; tg = "-"; tu = "?" }
+      n++; T[n] = $1 " " substr($2, 1, 8); D[n] = $1; SS[n] = t
+      CL[n] = pr; AV[n] = "-"; AR[n] = "-"; VV[n] = pr; RR[n] = "-"; PD[n] = kp; UU[n] = "-"
+      SV[n] = sv; TU[n] = tu; IDN[n] = tg; OP[n] = op; PA[n] = pa; WY[n] = w
+      if (catch != "" && wanted(n)) snap(n)
+      for (r = 0; r < dup; r++) emit(n, "noanswer", 0)
+      forget(n)
+      next
+    }
+    $6 == "REQUEST:"             {
+      u[key()] = field("tccd_uid", $0)
+      p = $4; sub(/^tccd\[/, "", p); sub(/:.*/, "", p); tpu[p] = field("tccd_uid", $0)   # which tccd a tccd pid is
+    }
     $6 == "AUTHREQ_CTX:"         { s[key()] = field("service", $0) }
     $6 == "AUTHREQ_SUBJECT:"     { c[key()] = field("subject", $0) }
     $6 == "AUTHREQ_ATTRIBUTION:" {
@@ -1227,6 +1294,7 @@ refusals() { # [catch] [PROGRAM]
         forget(p)
       }
       if (AV[n] != "2") {
+        rec[PD[n]] = D[n]; rsec[PD[n]] = SS[n]   # for the kernel line that follows it
         if (catch != "" && wanted(n)) snap(n)
         if (SV[n] == svc) { pend[S] = n; next }
         emit(n, "refused", 0)
@@ -1258,7 +1326,7 @@ render_refusals() { # <grants FILE>
     FILENAME == ARGV[1] { g[$3] = $4; gd[$3] = $6; next }
     FILENAME == ARGV[2] { fl[$1] = $2; next }
     $12 == "probe" && vrb != "1" { next }
-    { k = $2 SUBSEP $3 SUBSEP $5 SUBSEP $8 SUBSEP $9 SUBSEP $10 SUBSEP $12
+    { k = $2 SUBSEP $3 SUBSEP $5 SUBSEP $8 SUBSEP $9 SUBSEP $10 SUBSEP $12 SUBSEP $13 SUBSEP $14
       if (!(k in n)) { o[++rows] = k; first[k] = $1; last[k] = $1; cl[k] = $2; av[k] = $3; rs[k] = $5
                        sv[k] = $8; ar[k] = $9; tu[k] = $10; kind[k] = $12; pn[k] = $13 SUBSEP $14 SUBSEP $15 SUBSEP $16 }
       n[k]++; uid[k] = $7; pid[k] = $6; idn[k] = $11
@@ -1272,6 +1340,12 @@ render_refusals() { # <grants FILE>
         if (kind[k] == "probe") {
           split(pn[k], q, SUBSEP)
           note = "probe: then " short(q[1]) " allowed[" q[2] "] reason[" q[3] "] by tccd " q[4]
+        }
+        else if (kind[k] == "noanswer") {    # the kernel refused, tccd gave no answer
+          split(pn[k], q, SUBSEP)
+          note = q[1] " " q[2] " -> " (q[3] == "none seen" \
+            ? "no tccd answer in the log: catch the next one (" us " denied --catch)" \
+            : "tccd could not answer; a launcher with Full Disk Access is answered by the system tccd itself (" us " create)")
         }
         else if (rs[k] ~ /\/sshd-keygen-wrapper$/)
           note = "run in an ssh login -> System Settings > General > Sharing > Remote Login (i): Allow full disk access for remote users -- or run it through a launcher"
@@ -1291,12 +1365,16 @@ render_refusals() { # <grants FILE>
         else if (c ~ /^\//) note = "no grant -> " us " add " c
         else note = "no grant (an app) -> System Settings > Full Disk Access, +"
         st[i] = (av[k] == "0" ? "denied[0]" : "other[" av[k] "]") " reason[" ar[k] "]"
-        ss[i] = short(sv[k]); cnt[i] = n[k] "x"; nt[i] = note
+        ss[i] = (sv[k] == "" ? "?" : short(sv[k])); cnt[i] = n[k] "x"; nt[i] = note
         if (vrb == "1") vs[i] = via[k]
         else { vs[i] = via[k]; sub(/,.*/, "", vs[i]); sub(/.*\//, "", vs[i]); if (nv[k] > 1) vs[i] = vs[i] " (+" nv[k] - 1 ")" }
         fr[i] = rs[k]
         if (vrb == "1") fr[i] = (idn[k] == "-" || rs[k] == "-" ? "" : idn[k] " ") fr[i] " uid " uid[k] " pid " pid[k]
         else sub(/.*\//, "", fr[i])
+        if (kind[k] == "noanswer") {         # the answer it never got, and whom tccd was asked about
+          st[i] = "no answer[" q[3] "]"; fr[i] = q[4]
+          if (vrb != "1") sub(/-[0-9a-f]+\[/, "[", fr[i])   # python3-5555...[18476] -> python3[18476]
+        }
         if (length(c) > w) w = length(c)
         if (length(ss[i]) > ws) ws = length(ss[i])
         if (length(st[i]) > wa) wa = length(st[i])
@@ -1337,11 +1415,13 @@ cmd_denied() { # [PROGRAM] [LAST]
   refusal_scope "$_prog"
   PHASE="reading the system log -- nothing was changed"
   msg " >>> tccd's checks in the system log of the last $_last ($_scope) -- a long window takes a while"
-  run "$c_log" show --style compact --last "$_last" --predicate "$TCCD_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
+  run "$c_log" show --style compact --last "$_last" --predicate "$REFUSAL_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
     || err 00060 "log show failed: $(cat "$WORK/log.err")"
-  _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ } END { print n+0 }' "$WORK/log")
+  # what was read, raw: tccd's answers, and the kernel's refusals when any
+  _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ } $4 ~ /^kernel\[/ && / System Policy: [^(]+\([0-9]+\) deny\(/ { k++ }
+    END { printf "%d%s", n, (k ? "; kernel refusals read: " k : "") }' "$WORK/log")
   refusals "" "$_progarg" < "$WORK/log" > "$WORK/checks"
-  awk -F '\t' '$12 == "refused"' "$WORK/checks" > "$WORK/refused"
+  awk -F '\t' '$12 != "probe"' "$WORK/checks" > "$WORK/refused"   # refused, and refused with no answer
   _pb=$(awk -F '\t' '$12 == "probe" { n++ } END { print n+0 }' "$WORK/checks")
   _pr=""; [ "$_pb" = "0" ] || _pr="; $_pb probe(s) a narrower grant then allowed (-V)"
   if [ ! -s "$WORK/refused" ] && { [ "$_pb" = "0" ] || [ "$VRB" != "1" ]; }; then
@@ -1358,7 +1438,7 @@ cmd_denied() { # [PROGRAM] [LAST]
   render_refusals "$WORK/all" < "$WORK/checks"
   [ "$QUIET" = "1" ] || awk -F '\t' -v last="$_last" -v scope="$_scope" -v pr="$_pr" -v r="$_r" '
     { rows++; if (!($2 in c)) { c[$2]; progs++ } }
-    END { printf "%d refused check(s) from %d program(s) in the last %s (%s)%s [tccd checks read: %d]\n", rows, progs, last, scope, pr, r }' "$WORK/refused"
+    END { printf "%d refused check(s) from %d program(s) in the last %s (%s)%s [tccd checks read: %s]\n", rows, progs, last, scope, pr, r }' "$WORK/refused"
 }
 
 # denied --catch: the next refusals as they happen, each with the refused
@@ -1370,7 +1450,7 @@ catch_refusal() { # [PROGRAM]
   refusal_scope "${1:-}"
   PHASE="waiting for the next refusal -- nothing was changed"
   msg " >>> waiting for the next refused check ($_scope), then its process, parents and open files (Ctrl-C to stop)"
-  "$c_log" stream --style compact --predicate "$TCCD_PREDICATE" 2> "$WORK/log.err" | refusals catch "$_progarg" | tee "$WORK/caught"
+  "$c_log" stream --style compact --predicate "$REFUSAL_PREDICATE" 2> "$WORK/log.err" | refusals catch "$_progarg" | tee "$WORK/caught"
   [ -s "$WORK/caught" ] || err 00062 "log stream ended with no refusal: $(cat "$WORK/log.err")"
 }
 
@@ -2505,6 +2585,89 @@ t_denied_reports_without_the_grants() {
   case "$_o" in *"    > grants not read (ERROR "*"cannot read"*") -- what to do is from the log alone"*"/bin/vol "*"2 refused check(s)"*) ;; *) t_fail "got '$_o'"; return ;; esac
   if [ "$_rc" = "0" ]; then t_pass; else t_fail "rc $_rc"; fi
 }
+# Refusals tccd never answered, as logged on 2026-11-10 23:52:15-19 and
+# 2026-11-11 00:09:02: sandboxd's request failed (23:52), or tccd could not
+# reach the tccd it forwards to (00:09), and the kernel refused -- with no
+# AUTHREQ_RESULT at all. The REQUEST line (tccd 192 is the system's) is the
+# same tccd's at another moment; the "Sandbox:" lines are other sandboxes'.
+t_real_noanswer() {
+  _sb="tcc_server_message_request_authorization(kTCCServiceSystemPolicySysAdminFiles) failed: Error Domain=kTCCErrorDomain Code=2 \"missing 'auth_value' in reply message\" UserInfo={NSDescription=missing 'auth_value' in reply message}"
+  printf '%s\n' \
+    "2026-11-10 22:49:01.944 Df tccd[192:2c561ce] [com.apple.TCC:access] REQUEST: tccd_uid=0, sender_pid=186, sender_uid=0, sender_auid=-1, function=TCCAccessRequest, msgID=186.54035" \
+    "2026-11-10 23:52:15.955 E  sandboxd[186:2c9d550] $_sb" \
+    "2026-11-10 23:52:15.955 E  kernel[0:2c9d54f] [com.apple.sandbox.reporting:violation] System Policy: postconf(85000) deny(1) file-write-create /private/etc/postfix/master.cf.tmp" \
+    "2026-11-10 23:52:17.143 E  sandboxd[186:2c9be0e] $_sb" \
+    "2026-11-10 23:52:17.143 E  kernel[0:2c9d578] [com.apple.sandbox.reporting:violation] System Policy: postconf(85012) deny(1) file-write-create /private/etc/postfix/main.cf.tmp" \
+    "2026-11-10 23:52:18.317 E  sandboxd[186:2c9d550] $_sb" \
+    "2026-11-10 23:52:18.317 E  kernel[0:2c9d593] [com.apple.sandbox.reporting:violation] System Policy: postconf(85020) deny(1) file-write-create /private/etc/postfix/main.cf.tmp" \
+    "2026-11-10 23:52:19.361 E  sandboxd[186:2c9d550] $_sb" \
+    "2026-11-10 23:52:19.361 E  kernel[0:2c9d59c] [com.apple.sandbox.reporting:violation] System Policy: postconf(85022) deny(1) file-write-create /private/etc/postfix/main.cf.tmp" \
+    "2026-11-11 00:09:02.092 E  kernel[0:2d0f584] [com.apple.sandbox.reporting:violation] Sandbox: tccd(192) deny(1) system-info vfs.disk-space" \
+    "2026-11-11 00:09:02.096 E  tccd[192:2d10ca2] [com.apple.TCC:access] one instance of XPC forwardMessage error: Connection invalid. (service=kTCCServiceSystemPolicySysAdminFiles, requestor=com.apple.sandboxd, target_pid=18476, target_id=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, auid=0)" \
+    "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] [com.apple.sandbox.reporting:violation] 5 duplicate reports for Sandbox: tccd(192) deny(1) system-info vfs.disk-space" \
+    "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] [com.apple.sandbox.reporting:violation] System Policy: touch(4717) deny(1) file-write-create /private/etc/postfix/.probe"
+}
+t_denied_reports_a_refusal_tccd_never_answered() {
+  t_real_noanswer > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *Sandbox*|*disk-space*) t_fail "another sandbox's line: '$_o'"; return ;; esac
+  case "$_o" in *"touch "*"SystemPolicySysAdminFiles  no answer[Connection invalid] "*" tccd system[0]  1x  last 2026-11-11 00:09:02  via touch "*"from python3[18476]  file-write-create /private/etc/postfix/.probe -> tccd could not answer"*) ;; *) t_fail "00:09: '$_o'"; return ;; esac
+  case "$_o" in *"postconf "*"SystemPolicySysAdminFiles  no answer[missing 'auth_value' in reply message]  tccd ?"*"1x  last 2026-11-10 23:52:15"*"file-write-create /private/etc/postfix/master.cf.tmp"*) ;; *) t_fail "23:52, master.cf: '$_o'"; return ;; esac
+  case "$_o" in *"3x  last 2026-11-10 23:52:19"*"file-write-create /private/etc/postfix/main.cf.tmp"*) ;; *) t_fail "23:52, main.cf: '$_o'"; return ;; esac
+  case "$_o" in *"5 refused check(s) from 2 program(s)"*"[tccd checks read: 0; kernel refusals read: 5]"*) ;; *) t_fail "summary: '$_o'"; return ;; esac
+  _o=$(VRB=1 cmd_denied 2>&1)
+  case "$_o" in *"from python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2[18476]"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
+}
+# What must NOT be paired, made from the real lines: a kernel refusal with
+# no failure before it, one whose failure came 2 s earlier, one after two
+# failures of different services in the same second, and the kernel's side
+# of a refusal tccd answered -- that one is the answer's line, not a second.
+t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second() {
+  _k="[com.apple.sandbox.reporting:violation] System Policy: touch(4717) deny(1) file-write-create /private/etc/x"
+  _fe="[com.apple.TCC:access] one instance of XPC forwardMessage error: Connection invalid. (service=kTCCServiceSystemPolicySysAdminFiles, requestor=com.apple.sandboxd, target_pid=18476, target_id=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, auid=0)"
+  printf '%s\n' "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] $_k" > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"touch "*" ?  "*"no answer[none seen]"*"denied --catch"*) ;; *) t_fail "alone: '$_o'"; return ;; esac
+  printf '%s\n' "2026-11-11 00:09:00.096 E  tccd[192:2d10ca2] $_fe" "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] $_k" > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"no answer[none seen]"*) ;; *) t_fail "2 s apart: '$_o'"; return ;; esac
+  printf '%s\n' "2026-11-11 00:09:02.096 E  tccd[192:2d10ca2] $_fe" \
+    "2026-11-11 00:09:02.500 E  sandboxd[186:2c9d550] tcc_server_message_request_authorization(kTCCServiceSystemPolicyDesktopFolder) failed: Error Domain=kTCCErrorDomain Code=2 \"x\" UserInfo={}" \
+    "2026-11-11 00:09:02.600 E  kernel[0:2d10ca0] $_k" > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"touch "*" ?  "*"no answer["*) ;; *) t_fail "two services: '$_o'"; return ;; esac
+  case "$_o" in *"touch "*"SystemPolicy"*"no answer"*) t_fail "two services, one named: '$_o'"; return ;; esac
+  { t_check 191 1.1 "$SERVICE" /bin/touch /bin/touch 0 10:01:30 4717
+    printf '%s\n' "2026-10-25 10:01:30.500 E  kernel[0:2d10ca0] $_k"; } > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"no answer"*) t_fail "the answered refusal twice: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/touch  SystemPolicyAllFiles  denied[0] reason[5]"*"1 refused check(s)"*) ;; *) t_fail "answered: '$_o'"; return ;; esac
+  printf '%s\n' "2026-11-11 00:09:02.096 E  tccd[192:2d10ca2] $_fe" \
+    "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] [com.apple.sandbox.reporting:violation] 3 duplicate reports for System Policy: touch(4717) deny(1) file-write-create /private/etc/x" > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"no answer[Connection invalid]"*" 3x  "*) ;; *) t_fail "duplicates: '$_o'"; return ;; esac
+  # MADE UP: both failure lines for one refusal -- tccd's, which names the
+  # reason and the program asked about, is the one kept
+  printf '%s\n' "2026-11-11 00:09:02.096 E  tccd[192:2d10ca2] $_fe" \
+    "2026-11-11 00:09:02.096 E  sandboxd[186:2c9d550] tcc_server_message_request_authorization(kTCCServiceSystemPolicySysAdminFiles) failed: Error Domain=kTCCErrorDomain Code=2 \"missing 'auth_value' in reply message\" UserInfo={}" \
+    "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] $_k" > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"no answer[Connection invalid]"*"from python3[18476]"*) t_pass ;; *) t_fail "both failures: '$_o'" ;; esac
+}
+# --service asks for one service: a refusal whose service is unknown is
+# left out then, and kept by default.
+t_denied_service_part_leaves_out_an_unknown_service() {
+  { t_real_noanswer
+    printf '%s\n' "2026-11-11 00:10:30.000 E  kernel[0:2d10ca0] [com.apple.sandbox.reporting:violation] System Policy: cp(5000) deny(1) file-write-create /private/etc/y"; } > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"cp "*"no answer[none seen]"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$( (SERVICE_SEL=sysadmin; cmd_denied) 2>&1)
+  case "$_o" in *"cp "*) t_fail "sysadmin took the unknown: '$_o'"; return ;; esac
+  case "$_o" in *"touch "*"SystemPolicySysAdminFiles"*) ;; *) t_fail "sysadmin: '$_o'"; return ;; esac
+  _o=$( (SERVICE_SEL=AllFiles; cmd_denied) 2>&1)
+  case "$_o" in *"touch"*|*"postconf"*|*"cp "*) t_fail "AllFiles took them: '$_o'"; return ;; esac
+  case "$_o" in *"nothing refused"*) t_pass ;; *) t_fail "AllFiles: '$_o'" ;; esac
+}
 t_add_finds_a_grant_under_its_real_path() {
   ln -s "$T_DIR/bin" "$T_DIR/linked"
   t_grant 1 "$T_DIR/bin/tool"                       # macOS records the REAL path
@@ -2946,6 +3109,8 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
     t_list_points_a_refused_tool_at_its_job_not_at_remove \
     t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process \
     t_denied_selects_the_services t_denied_takes_a_program_by_name_or_path t_denied_reports_without_the_grants \
+    t_denied_reports_a_refusal_tccd_never_answered t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second \
+    t_denied_service_part_leaves_out_an_unknown_service \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \
                 t_launcher_is_readable_and_run_by_root_only \
                 t_as_root_open_runs_in_the_screen_users_session \
