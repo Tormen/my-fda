@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="3dfadf5"
-SCRIPT_RELEASE="v0.2-5-g3dfadf5"
+SCRIPT_COMMIT="1b1f891"
+SCRIPT_RELEASE="v0.2-6-g1b1f891"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -1740,6 +1740,99 @@ interrupt_traps() {
   trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 }
 
+############################################################## zsh completion
+
+# The zsh completion, rendered for this config: the launcher names come
+# from HELPER_DIR when Tab is pressed, everything else is fixed text.
+zsh_completion() {
+  cat <<_EOF
+#compdef my-fda
+# written by my-fda on each run -- edits here are overwritten
+
+_my-fda() {
+  local -a cmds names
+  cmds=(
+    'list:every grant and what to do with it'
+    'denied:file checks macOS refused, from the system log'
+    'add:put a program into the Full Disk Access list, switched off'
+    'remove:take grants away (go acts)'
+    'cleanup:the GONE grants (go acts)'
+    'reset:all grants at once (go acts)'
+    'create:build and install a launcher'
+    'destroy:delete a launcher and its grant (go acts)'
+    'status:each launcher, its target, its grant, its daemon'
+    'test:start the daemon of a launcher'
+  )
+  _arguments -C \\
+    '(-V --verbose)'{-V,--verbose}'[also each command, dates and paths]' \\
+    '(-Q --quiet)'{-Q,--quiet}'[nothing but errors]' \\
+    '--config[use this config]:config file:_files' \\
+    '--create-config[print the default config, or write it to a file]' \\
+    '--run-tests[run the built-in tests]' \\
+    '--stamp-version[record the commit in this file]' \\
+    '--version[version, git describe, build id]' \\
+    '(-h --help)'{-h,--help}'[help]' \\
+    '1:command:->cmd' \\
+    '*::arg:->args'
+  case \$state in
+    cmd) _describe -t commands 'my-fda command' cmds ;;
+    args)
+      names=( $HELPER_DIR/my-fda-*(N:t) ); names=( \${names#my-fda-} )
+      case \$words[1] in
+        denied)  _arguments '--catch[wait for the next refusal]' \\
+                   '--service[a part of a service name, or all]:service:(all AllFiles RemovableVolumes NetworkVolumes)' \\
+                   '*:program, or a window such as 2h:_files' ;;
+        add)     _files ;;
+        remove)  _arguments '--recommended[every grant list marks -> remove]' '*:ID:(go)' ;;
+        cleanup|reset) _values 'act' go ;;
+        create)  _arguments '--user[the user the target runs as]:user:_users' \\
+                   '--group[that user'"'"'s primary group instead]:group:_groups' '*:target:_files' ;;
+        destroy) _describe 'launcher' names; _values 'act' go ;;
+        status|test) _describe 'launcher' names ;;
+      esac ;;
+  esac
+}
+
+_my-fda "\$@"
+_EOF
+}
+
+# On every run, best-effort -- it never fails the run: the completion into
+# ~/.zsh/completions/_my-fda when it differs (mode 644: compinit ignores a
+# 600 file without a word; the zcompdump goes, or zsh keeps the old one),
+# and ~/.zshrc given the fpath line once. Each write is said in one line;
+# a run with nothing to write says nothing.
+install_zsh_completion() {
+  [ -n "${HOME:-}" ] || return 0
+  _zd="$HOME/.zsh/completions"; _zf="$_zd/_my-fda"
+  _zt=$(mktemp "${TMPDIR:-/tmp}/my-fda.comp.XXXXXX") || return 0
+  zsh_completion > "$_zt" || { rm -f "$_zt"; return 0; }
+  if [ -f "$_zf" ] && cmp -s "$_zt" "$_zf"; then
+    rm -f "$_zt"
+  else
+    _zw="written"; [ -f "$_zf" ] && _zw="updated"
+    { mkdir -p -- "$_zd" && chmod 644 "$_zt" && mv -f "$_zt" "$_zf"; } 2>/dev/null || { rm -f "$_zt"; return 0; }
+    rm -f "$HOME"/.zcompdump* 2>/dev/null
+    msg "    > zsh completion $_zw: $_zf (it was missing or older; a new shell loads it)"
+  fi
+  _zr="$HOME/.zshrc"
+  [ -f "$_zr" ] || return 0
+  grep -q '\.zsh/completions' "$_zr" 2>/dev/null && return 0
+  _zt=$(mktemp "${TMPDIR:-/tmp}/my-fda.zshrc.XXXXXX") || return 0
+  if grep -q 'oh-my-zsh\.sh' "$_zr" 2>/dev/null; then
+    # before oh-my-zsh, whose compinit then finds the directory
+    awk -v d="$_zd" '!done && /oh-my-zsh\.sh/ { print "# zsh completions (my-fda)"; print "fpath=(" d " $fpath)"; done = 1 } { print }' "$_zr" > "$_zt"
+  else
+    # shellcheck disable=SC2016  # $fpath is zsh's, written as it is
+    { cat "$_zr"; printf '\n# zsh completions (my-fda)\nfpath=(%s $fpath)\nautoload -Uz compinit && compinit\n' "$_zd"; } > "$_zt"
+  fi
+  # the file keeps its mode: cat over it, never mv
+  if [ -s "$_zt" ] && cat "$_zt" > "$_zr" 2>/dev/null; then
+    msg "    > $_zr: fpath line for $_zd added (once), so zsh finds the completion"
+  fi
+  rm -f "$_zt"
+}
+
 ############################################################## tests
 
 T_OK=0; T_BAD=0; T_NAME=""
@@ -2781,6 +2874,33 @@ t_help_names_every_verb() {
   done
   if [ -z "$_bad" ]; then t_pass; else t_fail "--help lacks:$_bad"; fi
 }
+# The completion: written once with mode 644 and every verb main knows,
+# ~/.zshrc given its fpath line before oh-my-zsh once, an older file
+# replaced -- and a second run writes and says nothing.
+t_completion_installs_once_and_names_every_verb() {
+  mkdir -p -- "$T_DIR/home"
+  # shellcheck disable=SC2016  # a .zshrc line, $ZSH is zsh's
+  printf '%s\n' 'export ZSH=x' 'source $ZSH/oh-my-zsh.sh' > "$T_DIR/home/.zshrc"
+  _o=$( (HOME="$T_DIR/home"; install_zsh_completion) 2>&1)
+  _f="$T_DIR/home/.zsh/completions/_my-fda"
+  case "$_o" in *"zsh completion written: $_f"*"fpath line for $T_DIR/home/.zsh/completions added (once)"*) ;; *) t_fail "first: '$_o'"; return ;; esac
+  case "$(ls -l "$_f")" in -rw-r--r--*) ;; *) t_fail "mode: $(ls -l "$_f")"; return ;; esac
+  _r=$(awk '/fpath=/ { f = NR } /oh-my-zsh\.sh/ { o = NR } END { print (f && f < o) ? "before" : "not before" }' "$T_DIR/home/.zshrc")
+  [ "$_r" = "before" ] || { t_fail "fpath $_r oh-my-zsh: $(cat "$T_DIR/home/.zshrc")"; return; }
+  _bad=""
+  for _v in $(sed -n 's/^  \(list|denied|[a-z|]*\)) ;;$/\1/p' "$(self_path)" | tr '|' ' '); do
+    grep -q "^    '$_v:" "$_f" || _bad="$_bad $_v"
+  done
+  [ -z "$_bad" ] || { t_fail "the completion lacks:$_bad"; return; }
+  if command -v zsh > /dev/null 2>&1; then zsh -n "$_f" 2> "$T_DIR/zsh.err" || { t_fail "zsh -n: $(cat "$T_DIR/zsh.err")"; return; }; fi
+  _o=$( (HOME="$T_DIR/home"; install_zsh_completion) 2>&1)
+  [ -z "$_o" ] || { t_fail "second run said: '$_o'"; return; }
+  [ "$(grep -c 'fpath=' "$T_DIR/home/.zshrc")" = "1" ] || { t_fail "fpath twice"; return; }
+  echo old > "$_f"
+  _o=$( (HOME="$T_DIR/home"; install_zsh_completion) 2>&1)
+  case "$_o" in *"zsh completion updated"*) ;; *) t_fail "older: '$_o'"; return ;; esac
+  if [ "$(head -n 1 "$_f")" = "#compdef my-fda" ]; then t_pass; else t_fail "not replaced: $(head -n 1 "$_f")"; fi
+}
 t_err_codes_unique_in_order_without_gaps() {
   _got=$(grep -o -E '(err|ERROR) 0[0-9]{4}' "$(self_path)" | awk '{ printf "%d ", $2 + 0 }')
   _want=$(awk -v n="$(printf '%s\n' "$_got" | wc -w)" 'BEGIN { for (i = 1; i <= n; i++) printf "%d ", i }')
@@ -2843,7 +2963,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_config_setting_a_key_empty_names_it \
                 t_default_config_has_every_key t_config_offer_names_only_searched_paths \
                 t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
-                t_help_names_every_verb t_err_codes_unique_in_order_without_gaps"
+                t_help_names_every_verb t_completion_installs_once_and_names_every_verb t_err_codes_unique_in_order_without_gaps"
   # Each test builds its own world, so the selected tests are dealt
   # round-robin into BLOCKS, one process per core, run in parallel (the
   # spread puts the slow ones -- cc builds -- in different blocks). A test
@@ -2942,6 +3062,7 @@ esac
 
 need_root
 load_config
+install_zsh_completion
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00112 "mktemp failed"
 interrupt_traps
 

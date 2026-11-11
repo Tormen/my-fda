@@ -187,6 +187,14 @@ arrives. `my-fda --create-config` prints the defaults. Search order: `$MY_FDA_CO
 `/LINKS/default/my-fda.conf`, `/LINKS/default/my-fda`, `~/.my-fda.conf`,
 `/etc/my-fda.conf`, `/usr/local/etc/my-fda.conf`.
 
+## Shell completion
+
+Each run writes the zsh completion to `~/.zsh/completions/_my-fda` when it
+is missing or older (mode 644, and the zcompdump goes, so a new shell loads
+it), and gives `~/.zshrc` the `fpath` line once -- before oh-my-zsh when it
+is there. It says so in one line when it writes; a run with nothing to write
+says nothing. The launcher names it offers are those in `HELPER_DIR`.
+
 ## Tests
 
     my-fda --run-tests [<FILTER>]
