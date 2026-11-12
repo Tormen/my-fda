@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="82c2879"
-SCRIPT_RELEASE="v0.2-12-g82c2879"
+SCRIPT_COMMIT="9bb41ad"
+SCRIPT_RELEASE="v0.2-13-g9bb41ad"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -226,7 +226,8 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 with its parents and the files it has open, while it still
                 runs -- the job behind a program refused "from -", and as
                 near as anything comes to the file it was refused; it ends
-                after the first one it could still see, or on Ctrl-C
+                after the first one it could still see, or on Ctrl-C; with
+                -V it also stops at a kernel refusal with no privacy check
   add <PATH>    "+": puts PATH into the Full Disk Access list switched OFF
                 and opens the pane -- macOS grants only on a click, so you
                 switch it on there -- then checks that it is on. Where
@@ -1165,7 +1166,7 @@ refusals() { # [catch] [PROGRAM]
   _sm="set"; _sp=$DENIED_SERVICES
   case "$SERVICE_SEL" in "") ;; all) _sm="all" ;; *) _sm="part"; _sp=$SERVICE_SEL ;; esac
   awk -v svc="$SERVICE" -v catch="${1:-}" -v prog="${2:-}" -v selmode="$_sm" -v selpat="$_sp" \
-      -v ps="$c_ps" -v lsof="$c_lsof" -v idc="$c_id" -v ign="$DENIED_IGNORE" '
+      -v ps="$c_ps" -v lsof="$c_lsof" -v idc="$c_id" -v ign="$DENIED_IGNORE" -v vrb="$VRB" '
     BEGIN {
       if (ign != "") {            # DENIED_IGNORE as one regex, lower case
         ni = split(tolower(ign), gi, "|"); ignre = ""
@@ -1268,10 +1269,12 @@ refusals() { # [catch] [PROGRAM]
           SV[i], AR[i], TU[i], IDN[i], kind, d1, d2, d3, d4, ig
         return
       }
-      if ((kind != "refused" && kind != "noanswer") || ig) return
-      if (kind == "noanswer")
-        printf "%s  %s  %s  no answer[%s]  tccd %s  %s %s  for %s  pid %s\n", T[i], CL[i], (SV[i] == "" ? "?" : short(SV[i])), WY[i], TU[i],
-          OP[i], PA[i], IDN[i], PD[i]
+      # what --catch waits for: a refusal; with -V, as in a listing, also a
+      # kernel refusal with no privacy check
+      if (kind == "probe" || (kind == "unpaired" && vrb != "1") || ig) return
+      if (kind == "noanswer" || kind == "unpaired")
+        printf "%s  %s  %s  %s  tccd %s  %s %s  for %s  pid %s\n", T[i], CL[i], (SV[i] == "" ? "?" : short(SV[i])),
+          (kind == "unpaired" ? "other[kernel]" : "no answer[" WY[i] "]"), TU[i], OP[i], PA[i], IDN[i], PD[i]
       else
         printf "%s  %s  %s  refused[%s] reason[%s]  tccd %s  via %s  from %s  uid %s  pid %s\n", T[i], CL[i], short(SV[i]), AV[i], AR[i], TU[i],
           VV[i], (RR[i] == "-" ? "(none: started with no parent macOS attributes it to)" : RR[i]), UU[i], PD[i]
@@ -1326,7 +1329,7 @@ refusals() { # [catch] [PROGRAM]
       n++; T[n] = $1 " " substr($2, 1, 8); D[n] = $1; SS[n] = t
       CL[n] = pr; AV[n] = "-"; AR[n] = "-"; VV[n] = pr; RR[n] = "-"; PD[n] = kp; UU[n] = "-"
       SV[n] = sv; TU[n] = tu; IDN[n] = tg; OP[n] = op; PA[n] = pa; WY[n] = w
-      if (catch != "" && kd == "noanswer" && wanted(n)) snap(n)
+      if (catch != "" && (kd == "noanswer" || vrb == "1") && wanted(n)) snap(n)
       for (r = 0; r < dup; r++) emit(n, kd, 0)
       forget(n)
       next
@@ -2862,7 +2865,10 @@ t_denied_counts_kernel_refusals_with_no_privacy_check() {
   case "$_o" in *"contactsd "*"other[kernel]"*" 6x "*"/private/var/db/appinstalld/Library/Preferences -> no tccd or sandboxd failure"*"backupd-helper "*"system-privilege 1009"*) ;; *) t_fail "-V: '$_o'"; return ;; esac
   # --catch waits past them for a refusal that is one
   _o=$( (CATCH=1; cmd_denied) 2>&1)
-  case "$_o" in *contactsd*|*backupd*) t_fail "--catch stopped at macOS's own: '$_o'" ;; *"touch  SystemPolicySysAdminFiles  no answer[Connection invalid]"*) t_pass ;; *) t_fail "--catch: '$_o'" ;; esac
+  case "$_o" in *contactsd*|*backupd*) t_fail "--catch stopped at macOS's own: '$_o'"; return ;; *"touch  SystemPolicySysAdminFiles  no answer[Connection invalid]"*) ;; *) t_fail "--catch: '$_o'"; return ;; esac
+  # --catch -V waits for them too, as a listing with -V shows them
+  _o=$( (CATCH=1; VRB=1; cmd_denied) 2>&1)
+  case "$_o" in *"contactsd  ?  other[kernel]  tccd ?  file-write-create /private/var/db/appinstalld/Library/Preferences  for -  pid 512"*) t_pass ;; *) t_fail "--catch -V: '$_o'" ;; esac
 }
 # An app refused a narrower protection gets the pane's answer, not a
 # launcher; a program path keeps the launcher (com.epson.edca on a removable

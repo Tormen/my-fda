@@ -147,7 +147,8 @@ selection goes through the pipe `list` is made for:
   protection -- a daemon writing under `/private/var/db`, a
   `system-privilege` -- not a privacy refusal: no grant and no launcher
   changes it. `denied` counts such lines in its summary and lists them only
-  with `-V` (`other[kernel]`).
+  with `-V` (`other[kernel]`); `denied --catch` waits past them, and with
+  `-V` stops at one too -- to look at what does it.
 - **An app or a job.** A program refused a narrower protection is pointed at
   a launcher (`my-fda create`) when it is a path -- a job of yours; an app,
   named by its bundle id, at System Settings > Privacy & Security > Files and
