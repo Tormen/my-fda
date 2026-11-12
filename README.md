@@ -138,11 +138,24 @@ selection goes through the pipe `list` is made for:
 
       touch  SystemPolicySysAdminFiles  no answer[Connection invalid]  tccd system[0]  1x  last ...  via touch  from python3[18476]  file-write-create /private/etc/x -> ...
 
-  With no failure in that second, the service is `?` and the reason `none
-  seen`; with two failures of different services in it, the service is `?`
-  too -- never a guess. The kernel's side of a refusal tccd answered is not
+  With two failures of different services in that second, the service is
+  `?` -- never a guess. The kernel's side of a refusal tccd answered is not
   listed twice. Its `Sandbox: ...` lines are other sandboxes' and are left
   out.
+- **A kernel refusal with no privacy check.** A `System Policy:` line with
+  no tccd or sandboxd failure in the second before it is another macOS
+  protection -- a daemon writing under `/private/var/db`, a
+  `system-privilege` -- not a privacy refusal: no grant and no launcher
+  changes it. `denied` counts such lines in its summary and lists them only
+  with `-V` (`other[kernel]`).
+- **An app or a job.** A program refused a narrower protection is pointed at
+  a launcher (`my-fda create`) when it is a path -- a job of yours; an app,
+  named by its bundle id, at System Settings > Privacy & Security > Files and
+  Folders, where its grant is given -- or left refused.
+- **`DENIED_IGNORE`** (config): programs whose refusals are left out, by
+  file name or glob, `|` between them, ignoring case, matched against the
+  program, `via` and `from` -- counted, shown with `-V`, left out with `-Q`
+  too: noise you decided to live with.
 - **Which checks:** PROGRAM is a name (`git`), matched ignoring case against
   the program, `via` and `from`, or a path, matched with its links followed;
   a LAST starts with a digit (`30m`, `2h`, `3d`) or is `boot`; instead of

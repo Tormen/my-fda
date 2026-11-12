@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="d449020"
-SCRIPT_RELEASE="v0.2-11-gd449020"
+SCRIPT_COMMIT="82c2879"
+SCRIPT_RELEASE="v0.2-12-g82c2879"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -200,7 +200,12 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 is counted, -V shows it. A check tccd could not answer (it
                 could not reach the tccd it forwards to) is the kernel's
                 refusal: no answer[why], the operation and the path, and
-                from: the program tccd was asked about.
+                from: the program tccd was asked about. A kernel refusal
+                with no tccd or sandboxd failure is another macOS
+                protection, not a privacy refusal: counted, -V shows it.
+                An app (a bundle id) is pointed at the pane, a program at
+                a launcher. DENIED_IGNORE names programs to leave out
+                (counted, -V shows them; -Q leaves them out too).
                 PROGRAM: a name (git) matches the program, via or from,
                 ignoring case; a path matches that file, its links
                 followed. A LAST starts with a digit, or is boot.
@@ -368,6 +373,11 @@ DENIED_LAST_DEFAULT="1d"
 # protections (Full Disk Access, the removable and network volumes, Desktop,
 # Documents, Downloads, ...).
 DENIED_SERVICES="kTCCServiceSystemPolicy*"
+
+# Programs whose refusals denied leaves out -- counted in its summary, shown
+# with -V, left out with -Q too: file names or globs, '|' between them,
+# ignoring case, matched against the program, via and from (empty: none).
+DENIED_IGNORE=""
 
 # Full Disk Access given by configuration profiles (MDM) -- listed, never
 # shown in System Settings.
@@ -1155,8 +1165,15 @@ refusals() { # [catch] [PROGRAM]
   _sm="set"; _sp=$DENIED_SERVICES
   case "$SERVICE_SEL" in "") ;; all) _sm="all" ;; *) _sm="part"; _sp=$SERVICE_SEL ;; esac
   awk -v svc="$SERVICE" -v catch="${1:-}" -v prog="${2:-}" -v selmode="$_sm" -v selpat="$_sp" \
-      -v ps="$c_ps" -v lsof="$c_lsof" -v idc="$c_id" '
+      -v ps="$c_ps" -v lsof="$c_lsof" -v idc="$c_id" -v ign="$DENIED_IGNORE" '
     BEGIN {
+      if (ign != "") {            # DENIED_IGNORE as one regex, lower case
+        ni = split(tolower(ign), gi, "|"); ignre = ""
+        for (i = 1; i <= ni; i++) {
+          r = gi[i]; gsub(/\./, "\\.", r); gsub(/\*/, ".*", r); gsub(/\?/, ".", r)
+          ignre = ignre (ignre == "" ? "" : "|") "^" r "$"
+        }
+      }
       if (selmode == "set") {     # the shell patterns of DENIED_SERVICES as one regex
         ng = split(selpat, g, "|"); setre = ""
         for (i = 1; i <= ng; i++) {
@@ -1194,6 +1211,10 @@ refusals() { # [catch] [PROGRAM]
         tn[x] = (l == "" ? "uid" : l) "[" x "]"
       }
       return tn[x]
+    }
+    function ignored(i) {              # a program DENIED_IGNORE names, as program, via or from
+      if (ignre == "") return 0
+      return (base(CL[i]) ~ ignre || base(VV[i]) ~ ignre || base(RR[i]) ~ ignre)
     }
     function wanted(i) {               # of the services selected, and of the program
       # a refusal whose service is unknown ("") is still a refusal: only
@@ -1238,15 +1259,16 @@ refusals() { # [catch] [PROGRAM]
     }
     function emit(i, kind, j,   d1, d2, d3, d4) {
       if (!wanted(i)) return
+      ig = ((kind == "refused" || kind == "noanswer") && ignored(i)) ? 1 : 0
       if (catch == "") {
         d1 = d2 = d3 = d4 = "-"
         if (j > 0) { d1 = SV[j]; d2 = AV[j]; d3 = AR[j]; d4 = TU[j] }
-        if (kind == "noanswer") { d1 = OP[i]; d2 = PA[i]; d3 = WY[i]; d4 = IDN[i] }
-        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", T[i], CL[i], AV[i], VV[i], RR[i], PD[i], UU[i],
-          SV[i], AR[i], TU[i], IDN[i], kind, d1, d2, d3, d4
+        else if (OP[i] != "") { d1 = OP[i]; d2 = PA[i]; d3 = WY[i]; d4 = IDN[i] }
+        printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", T[i], CL[i], AV[i], VV[i], RR[i], PD[i], UU[i],
+          SV[i], AR[i], TU[i], IDN[i], kind, d1, d2, d3, d4, ig
         return
       }
-      if (kind == "probe") return
+      if ((kind != "refused" && kind != "noanswer") || ig) return
       if (kind == "noanswer")
         printf "%s  %s  %s  no answer[%s]  tccd %s  %s %s  for %s  pid %s\n", T[i], CL[i], (SV[i] == "" ? "?" : short(SV[i])), WY[i], TU[i],
           OP[i], PA[i], IDN[i], PD[i]
@@ -1294,14 +1316,18 @@ refusals() { # [catch] [PROGRAM]
       op = x; sub(/ .*/, "", op); pa = x; sub(/^[^ ]+ ?/, "", pa)
       dup = 1; if (match($0, /[0-9]+ duplicate reports for System Policy: /)) dup = substr($0, RSTART, RLENGTH) + 0
       t = secs($2)
+      kd = "noanswer"
       if (fd == $1 && t - ft >= 0 && t - ft <= 1) { sv = (fa ? "" : fsv); w = fwhy; tg = ftg; tu = ftu }
       else if ((kp in rec) && rec[kp] == $1 && t - rsec[kp] <= 1) next
-      else { sv = ""; w = "none seen"; tg = "-"; tu = "?" }
+      # no tccd or sandboxd failure came with it: another macOS protection
+      # (contactsd writing under /private/var/db, a system-privilege), not a
+      # privacy refusal -- counted, shown with -V
+      else { sv = ""; w = "none seen"; tg = "-"; tu = "?"; kd = "unpaired" }
       n++; T[n] = $1 " " substr($2, 1, 8); D[n] = $1; SS[n] = t
       CL[n] = pr; AV[n] = "-"; AR[n] = "-"; VV[n] = pr; RR[n] = "-"; PD[n] = kp; UU[n] = "-"
       SV[n] = sv; TU[n] = tu; IDN[n] = tg; OP[n] = op; PA[n] = pa; WY[n] = w
-      if (catch != "" && wanted(n)) snap(n)
-      for (r = 0; r < dup; r++) emit(n, "noanswer", 0)
+      if (catch != "" && kd == "noanswer" && wanted(n)) snap(n)
+      for (r = 0; r < dup; r++) emit(n, kd, 0)
       forget(n)
       next
     }
@@ -1366,10 +1392,11 @@ render_refusals() { # <grants FILE>
     function short(x) { sub(/^kTCCService/, "", x); return x }
     FILENAME == ARGV[1] { g[$3] = $4; gd[$3] = $6; next }
     FILENAME == ARGV[2] { fl[$1] = $2; next }
-    $12 == "probe" && vrb != "1" { next }
-    { k = $2 SUBSEP $3 SUBSEP $5 SUBSEP $8 SUBSEP $9 SUBSEP $10 SUBSEP $12 SUBSEP $13 SUBSEP $14
+    ($12 == "probe" || $12 == "unpaired" || $17 == "1") && vrb != "1" { next }
+    { k = $2 SUBSEP $3 SUBSEP $5 SUBSEP $8 SUBSEP $9 SUBSEP $10 SUBSEP $12 SUBSEP $13 SUBSEP $14 SUBSEP $17
       if (!(k in n)) { o[++rows] = k; first[k] = $1; last[k] = $1; cl[k] = $2; av[k] = $3; rs[k] = $5
-                       sv[k] = $8; ar[k] = $9; tu[k] = $10; kind[k] = $12; pn[k] = $13 SUBSEP $14 SUBSEP $15 SUBSEP $16 }
+                       sv[k] = $8; ar[k] = $9; tu[k] = $10; kind[k] = $12; pn[k] = $13 SUBSEP $14 SUBSEP $15 SUBSEP $16
+                       ig[k] = $17 }
       n[k]++; uid[k] = $7; pid[k] = $6; idn[k] = $11
       # held answers come out of order: the dates, local "YYYY-MM-DD HH:MM:SS", compare as strings
       if ($1 < first[k]) first[k] = $1
@@ -1381,6 +1408,10 @@ render_refusals() { # <grants FILE>
         if (kind[k] == "probe") {
           split(pn[k], q, SUBSEP)
           note = "probe: then " short(q[1]) " allowed[" q[2] "] reason[" q[3] "] by tccd " q[4]
+        }
+        else if (kind[k] == "unpaired") {    # the kernel refused, and no privacy check came with it
+          split(pn[k], q, SUBSEP)
+          note = q[1] " " q[2] " -> no tccd or sandboxd failure came with it: another macOS protection, not a privacy refusal"
         }
         else if (kind[k] == "noanswer") {    # the kernel refused, tccd gave no answer
           split(pn[k], q, SUBSEP)
@@ -1398,6 +1429,9 @@ render_refusals() { # <grants FILE>
           note = "not a file protection: System Settings > Privacy & Security > " short(sv[k])
         else if (c ~ /^com\.apple\./ || c ~ /^\/(System|bin|sbin|usr\/bin|usr\/sbin|usr\/libexec|Library\/Apple)\//)
           note = "Apple'"'"'s own, no grant: macOS refuses it routinely -- act only if a job of yours runs through it (via)"
+        # an app the user runs (a bundle id, not the program path of a job): the pane grants it
+        else if (sv[k] != svc && c !~ /^\//)
+          note = "an app: System Settings > Privacy & Security > Files and Folders, " c " -- allow it there, or leave it refused"
         else if (sv[k] != svc) note = "no grant here -> give its job a launcher with Full Disk Access (" us " create)"
         # both dates are local "YYYY-MM-DD HH:MM:SS": they compare as strings
         else if (g[c] == "allowed[2]" && gd[c] > last[k]) note = "granted " gd[c] ", after the last refusal -- nothing to do"
@@ -1406,12 +1440,14 @@ render_refusals() { # <grants FILE>
         else if (c ~ /^\//) note = "no grant -> " us " add " c
         else note = "no grant (an app) -> System Settings > Full Disk Access, +"
         st[i] = (av[k] == "0" ? "denied[0]" : "other[" av[k] "]") " reason[" ar[k] "]"
+        if (ig[k] == "1") note = "ignored (DENIED_IGNORE); " note
         ss[i] = (sv[k] == "" ? "?" : short(sv[k])); cnt[i] = n[k] "x"; nt[i] = note
         if (vrb == "1") vs[i] = via[k]
         else { vs[i] = via[k]; sub(/,.*/, "", vs[i]); sub(/.*\//, "", vs[i]); if (nv[k] > 1) vs[i] = vs[i] " (+" nv[k] - 1 ")" }
         fr[i] = rs[k]
         if (vrb == "1") fr[i] = (idn[k] == "-" || rs[k] == "-" ? "" : idn[k] " ") fr[i] " uid " uid[k] " pid " pid[k]
         else sub(/.*\//, "", fr[i])
+        if (kind[k] == "unpaired") { st[i] = "other[kernel]"; fr[i] = "-" }
         if (kind[k] == "noanswer") {         # the answer it never got, and whom tccd was asked about
           st[i] = "no answer[" q[3] "]"; fr[i] = q[4]
           if (vrb != "1") sub(/-[0-9a-f]+\[/, "[", fr[i])   # python3-5555...[18476] -> python3[18476]
@@ -1493,10 +1529,19 @@ cmd_denied() { # [PROGRAM] [LAST]
   _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ } $4 ~ /^kernel\[/ && / System Policy: [^(]+\([0-9]+\) deny\(/ { k++ }
     END { printf "%d%s", n, (k ? "; kernel refusals read: " k : "") }' "$WORK/log")
   refusals "" "$_progarg" < "$WORK/log" > "$WORK/checks"
-  awk -F '\t' '$12 != "probe"' "$WORK/checks" > "$WORK/refused"   # refused, and refused with no answer
+  # listed: refused, and refused with no answer, unless DENIED_IGNORE names
+  # the program; counted, and shown only with -V: probes, kernel refusals
+  # with no privacy check, ignored programs
+  awk -F '\t' '($12 == "refused" || $12 == "noanswer") && $17 != "1"' "$WORK/checks" > "$WORK/refused"
   _pb=$(awk -F '\t' '$12 == "probe" { n++ } END { print n+0 }' "$WORK/checks")
-  _pr=""; [ "$_pb" = "0" ] || _pr="; $_pb probe(s) a narrower grant then allowed (-V)"
-  if [ ! -s "$WORK/refused" ] && { [ "$_pb" = "0" ] || [ "$VRB" != "1" ]; }; then
+  _ot=$(awk -F '\t' '$12 == "unpaired" { n++ } END { print n+0 }' "$WORK/checks")
+  _ig=$(awk -F '\t' '$17 == "1" { n++ } END { print n+0 }' "$WORK/checks")
+  _pr=""
+  [ "$_pb" = "0" ] || _pr="; $_pb probe(s) a narrower grant then allowed"
+  [ "$_ot" = "0" ] || _pr="$_pr; $_ot kernel refusal(s) with no privacy check"
+  [ "$_ig" = "0" ] || _pr="$_pr; $_ig ignored (DENIED_IGNORE)"
+  [ -z "$_pr" ] || _pr="$_pr (-V)"
+  if [ ! -s "$WORK/refused" ] && { [ "$((_pb + _ot + _ig))" = "0" ] || [ "$VRB" != "1" ]; }; then
     msg "nothing refused $_in ($_scope)$_pr [tccd checks read: $_r]"
     return 0
   fi
@@ -2019,7 +2064,7 @@ t_world() {
   export T_DIR
   c_mdfind="$T_STUBS/mdfind"; c_open="$T_STUBS/open"; c_launchctl="$T_STUBS/launchctl"
   c_tccutil="$T_STUBS/tccutil"; c_pbcopy="$T_STUBS/pbcopy"; c_osascript="$T_STUBS/osascript"
-  c_log="$T_STUBS/log"; c_ps=/bin/ps; c_lsof=/usr/sbin/lsof; c_id="$T_STUBS/id"; c_date=/bin/date; SITE_CONF="$T_DIR/site.conf"; DENIED_LAST_DEFAULT="1d"; CATCH=0; SERVICE_SEL=""; SINCE_ARG=""; UNTIL_ARG=""
+  c_log="$T_STUBS/log"; c_ps=/bin/ps; c_lsof=/usr/sbin/lsof; c_id="$T_STUBS/id"; c_date=/bin/date; SITE_CONF="$T_DIR/site.conf"; DENIED_IGNORE=""; DENIED_LAST_DEFAULT="1d"; CATCH=0; SERVICE_SEL=""; SINCE_ARG=""; UNTIL_ARG=""
   eval "$(default_config | grep '^DENIED_SERVICES=')"   # the shipped services, from their one owner
   MDM_OVERRIDES="$T_DIR/MDMOverrides.plist"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
@@ -2701,10 +2746,15 @@ t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second() {
   _fe="[com.apple.TCC:access] one instance of XPC forwardMessage error: Connection invalid. (service=kTCCServiceSystemPolicySysAdminFiles, requestor=com.apple.sandboxd, target_pid=18476, target_id=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, auid=0)"
   printf '%s\n' "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] $_k" > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
-  case "$_o" in *"touch "*" ?  "*"no answer[none seen]"*"denied --catch"*) ;; *) t_fail "alone: '$_o'"; return ;; esac
+  # alone: no privacy check came with it -- counted, listed only with -V
+  case "$_o" in *"touch "*) t_fail "alone, listed: '$_o'"; return ;; esac
+  case "$_o" in *"nothing refused"*"; 1 kernel refusal(s) with no privacy check (-V)"*) ;; *) t_fail "alone: '$_o'"; return ;; esac
+  _o=$(VRB=1 cmd_denied 2>&1)
+  case "$_o" in *"touch "*" ?  "*"other[kernel]"*"file-write-create /private/etc/x -> no tccd or sandboxd failure came with it"*) ;; *) t_fail "alone, -V: '$_o'"; return ;; esac
   printf '%s\n' "2026-11-11 00:09:00.096 E  tccd[192:2d10ca2] $_fe" "2026-11-11 00:09:02.096 E  kernel[0:2d10ca0] $_k" > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
-  case "$_o" in *"no answer[none seen]"*) ;; *) t_fail "2 s apart: '$_o'"; return ;; esac
+  case "$_o" in *"no answer["*) t_fail "2 s apart, paired: '$_o'"; return ;; esac
+  case "$_o" in *"1 kernel refusal(s) with no privacy check"*) ;; *) t_fail "2 s apart: '$_o'"; return ;; esac
   printf '%s\n' "2026-11-11 00:09:02.096 E  tccd[192:2d10ca2] $_fe" \
     "2026-11-11 00:09:02.500 E  sandboxd[186:2c9d550] tcc_server_message_request_authorization(kTCCServiceSystemPolicyDesktopFolder) failed: Error Domain=kTCCErrorDomain Code=2 \"x\" UserInfo={}" \
     "2026-11-11 00:09:02.600 E  kernel[0:2d10ca0] $_k" > "$T_DIR/tccd.log"
@@ -2734,7 +2784,10 @@ t_denied_service_part_leaves_out_an_unknown_service() {
   { t_real_noanswer
     printf '%s\n' "2026-11-11 00:10:30.000 E  kernel[0:2d10ca0] [com.apple.sandbox.reporting:violation] System Policy: cp(5000) deny(1) file-write-create /private/etc/y"; } > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
-  case "$_o" in *"cp "*"no answer[none seen]"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  case "$_o" in *"cp "*) t_fail "default listed cp, no privacy check: '$_o'"; return ;; esac
+  case "$_o" in *"5 refused check(s)"*"; 1 kernel refusal(s) with no privacy check (-V)"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$(VRB=1 cmd_denied 2>&1)
+  case "$_o" in *"cp "*"other[kernel]"*) ;; *) t_fail "-V: '$_o'"; return ;; esac
   _o=$( (SERVICE_SEL=sysadmin; cmd_denied) 2>&1)
   case "$_o" in *"cp "*) t_fail "sysadmin took the unknown: '$_o'"; return ;; esac
   case "$_o" in *"touch "*"SystemPolicySysAdminFiles"*) ;; *) t_fail "sysadmin: '$_o'"; return ;; esac
@@ -2787,6 +2840,56 @@ t_denied_until_ends_a_since_window() {
   case "$_rc|$_o" in 1"|ERROR "*"takes no LAST, --since or --until"*) ;; *) t_fail "--catch: rc $_rc '$_o'"; return ;; esac
   _o=$("$(self_path)" --until "2025-01-02 03:19:05" list 2>&1) && { t_fail "took list: '$_o'"; return; }
   case "$_o" in *"--until goes with denied"*) t_pass ;; *) t_fail "list: '$_o'" ;; esac
+}
+# A kernel refusal with no privacy check, made up in the format the first
+# reports showed: contactsd writing under /private/var/db, backupd-helper's
+# system-privilege -- macOS's own business, counted and left for -V; beside
+# them a refusal tccd never answered, which stays listed.
+t_denied_counts_kernel_refusals_with_no_privacy_check() {
+  _v="[com.apple.sandbox.reporting:violation] System Policy:"
+  printf '%s\n' \
+    "2026-11-12 12:10:01.001 E  kernel[0:1] $_v contactsd(512) deny(1) file-write-create /private/var/db/appinstalld/Library/Preferences" \
+    "2026-11-12 12:10:03.001 E  kernel[0:1] [com.apple.sandbox.reporting:violation] 5 duplicate reports for System Policy: contactsd(512) deny(1) file-write-create /private/var/db/appinstalld/Library/Preferences" \
+    "2026-11-12 12:10:05.001 E  kernel[0:1] $_v backupd-helper(600) deny(1) system-privilege 1009" \
+    "2026-11-12 12:10:07.000 E  tccd[192:2] [com.apple.TCC:access] one instance of XPC forwardMessage error: Connection invalid. (service=kTCCServiceSystemPolicySysAdminFiles, requestor=com.apple.sandboxd, target_pid=18476, target_id=python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2, auid=0)" \
+    "2026-11-12 12:10:07.001 E  kernel[0:1] $_v touch(4717) deny(1) file-write-create /private/etc/x" > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *contactsd*|*backupd*) t_fail "listed macOS's own: '$_o'"; return ;; esac
+  case "$_o" in *"touch "*"no answer[Connection invalid]"*"1 refused check(s) from 1 program(s)"*"; 7 kernel refusal(s) with no privacy check (-V)"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$(QUIET=1 cmd_denied 2>&1)
+  case "$(printf '%s\n' "$_o" | wc -l | tr -d ' ')|$_o" in "1|touch "*) ;; *) t_fail "-Q: '$_o'"; return ;; esac
+  _o=$(VRB=1 cmd_denied 2>&1)
+  case "$_o" in *"contactsd "*"other[kernel]"*" 6x "*"/private/var/db/appinstalld/Library/Preferences -> no tccd or sandboxd failure"*"backupd-helper "*"system-privilege 1009"*) ;; *) t_fail "-V: '$_o'"; return ;; esac
+  # --catch waits past them for a refusal that is one
+  _o=$( (CATCH=1; cmd_denied) 2>&1)
+  case "$_o" in *contactsd*|*backupd*) t_fail "--catch stopped at macOS's own: '$_o'" ;; *"touch  SystemPolicySysAdminFiles  no answer[Connection invalid]"*) t_pass ;; *) t_fail "--catch: '$_o'" ;; esac
+}
+# An app refused a narrower protection gets the pane's answer, not a
+# launcher; a program path keeps the launcher (com.epson.edca on a removable
+# volume, as a first report showed it).
+t_denied_tells_an_app_from_a_job() {
+  { t_check 1919 2.1 kTCCServiceSystemPolicyRemovableVolumes com.epson.edca /Applications/Edca.app/Contents/MacOS/Edca 0 12:04:32 777 - 1001
+    t_check 1919 3.1 kTCCServiceSystemPolicyRemovableVolumes "$T_DIR/bin/vol" "$T_DIR/bin/vol" 0 12:04:33 778 "" 1001; } > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"com.epson.edca "*"an app: System Settings > Privacy & Security > Files and Folders, com.epson.edca -- allow it there, or leave it refused"*) ;; *) t_fail "app: '$_o'"; return ;; esac
+  case "$(printf '%s\n' "$_o" | grep '^com.epson.edca ')" in *launcher*) t_fail "app told to get a launcher: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/vol "*"no grant here -> give its job a launcher with Full Disk Access"*) t_pass ;; *) t_fail "job: '$_o'" ;; esac
+}
+# DENIED_IGNORE: the programs named (globs, any case, as program, via or
+# from) are left out -- counted, shown with -V, gone with -Q -- and nothing
+# else is.
+t_denied_ignore_leaves_out_the_programs_named() {
+  { t_check 1919 2.1 kTCCServiceSystemPolicyRemovableVolumes com.epson.edca /Applications/Edca.app/Contents/MacOS/Edca 0 12:04:32 777 - 1001
+    t_check 191 3.1 "$SERVICE" "$T_DIR/bin/tool" "$T_DIR/bin/tool" 0 12:04:33; } > "$T_DIR/tccd.log"
+  _o=$( (DENIED_IGNORE="*EDCA|nothing"; cmd_denied) 2>&1)
+  case "$_o" in *"com.epson.edca "*) t_fail "listed an ignored one: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/tool "*"1 refused check(s) from 1 program(s)"*"; 1 ignored (DENIED_IGNORE) (-V)"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$( (DENIED_IGNORE="*EDCA|nothing"; QUIET=1; cmd_denied) 2>&1)
+  case "$_o" in *edca*) t_fail "-Q listed it: '$_o'"; return ;; esac
+  _o=$( (DENIED_IGNORE="*EDCA|nothing"; VRB=1; cmd_denied) 2>&1)
+  case "$_o" in *"com.epson.edca "*"ignored (DENIED_IGNORE); an app:"*) ;; *) t_fail "-V: '$_o'"; return ;; esac
+  _o=$( (DENIED_IGNORE="epson"; cmd_denied) 2>&1)
+  case "$_o" in *"com.epson.edca "*) t_pass ;; *) t_fail "a name that is no whole name ignored it: '$_o'" ;; esac
 }
 t_add_finds_a_grant_under_its_real_path() {
   ln -s "$T_DIR/bin" "$T_DIR/linked"
@@ -3267,6 +3370,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
     t_denied_selects_the_services t_denied_takes_a_program_by_name_or_path t_denied_reports_without_the_grants \
     t_denied_reports_a_refusal_tccd_never_answered t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second \
     t_denied_service_part_leaves_out_an_unknown_service t_denied_since_reads_from_a_local_time t_denied_until_ends_a_since_window \
+    t_denied_counts_kernel_refusals_with_no_privacy_check t_denied_tells_an_app_from_a_job t_denied_ignore_leaves_out_the_programs_named \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \
                 t_launcher_is_readable_and_run_by_root_only \
                 t_as_root_open_runs_in_the_screen_users_session \
