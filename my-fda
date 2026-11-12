@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="d451eee"
-SCRIPT_RELEASE="v0.2-17-gd451eee"
+SCRIPT_COMMIT="d118edd"
+SCRIPT_RELEASE="v0.2-18-gd118edd"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -18,6 +18,7 @@ USER_ARG=""          # create --user: the user the launcher runs its target as
 GROUP_ARG=""         # create --group: that user's primary group instead of their own
 RECOMMENDED=0        # remove --recommended: the grants list marks TO_REMOVE, instead of IDs
 CATCH=0              # denied --catch: wait for the next refusal instead of reading the past
+INSTALL=0            # --install: record what this machine lets my-fda do, in its config
 SERVICE_SEL=""       # denied --service: "" = DENIED_SERVICES, all, or a part of a service's name
 SITE_CONF="/LINKS/default/site.conf"   # the ONE site path in this tool: read_site
 SINCE_ARG=""         # denied --since: the local time its window starts at, or ""
@@ -161,8 +162,9 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 what to do with it:
                   GONE -> remove        the path or the app no longer exists
                   GONE: stays           a gone app where TCC.db cannot be
-                                        written: nothing can take it, and it
-                                        applies to nothing
+                                        written (TCC_DB_WRITABLE, which
+                                        --install records): nothing can
+                                        take it, and it applies to nothing
                   a shell, a general tool (GENERAL_TOOLS), a script, or
                   anything in Homebrew (BREW_TREES) -> remove; its job
                                         gets a launcher: whatever runs a
@@ -295,6 +297,9 @@ OPTIONS
   --create-config [<FILE>]
                         print the default config, or write it to <FILE>
                         (never over an existing one)
+  --install             test once whether TCC.db can be written here, and
+                        record it (TCC_DB_WRITABLE) in this machine's config,
+                        committed: list reads it, and never tests
   --run-tests [<FILTER>]
                         run the built-in tests (name substring)
   --stamp-version       record the commit in this file (maintainer)
@@ -306,9 +311,13 @@ CONFIG (first found wins)
   \$CONFIG_SEARCH_DIR/my-fda, ~/.my-fda.conf, /etc/my-fda.conf,
   /usr/local/etc/my-fda.conf
   A key the file does not set keeps its default (--create-config).
+  Found in CONFIG_SEARCH_DIR, it is read from the trees instead: the
+  site's CONFIG_OFFER_DIR/my-fda.conf, then CONFIG_LOCAL_DIR/my-fda.conf,
+  this machine's own, which wins key by key.
   $SITE_CONF, when there, is read first: the site's
-  CONFIG_SEARCH_DIR, and DATA_BASE_DIR, under which BACKUP_DIR's default
-  lies (/var/db without the file). There but unreadable: an error.
+  CONFIG_SEARCH_DIR, CONFIG_OFFER_DIR, CONFIG_LOCAL_DIR, and DATA_BASE_DIR,
+  under which BACKUP_DIR's default lies (/var/db without the file).
+  There but unreadable: an error.
 _EOF
 }
 
@@ -367,6 +376,7 @@ c_ps="/bin/ps"
 c_lsof="/usr/sbin/lsof"
 c_id="/usr/bin/id"
 c_date="/bin/date"
+c_git="/usr/bin/git"
 
 # How far back denied reads the system log when given no window.
 DENIED_LAST_DEFAULT="1d"
@@ -381,6 +391,11 @@ DENIED_SERVICES="kTCCServiceSystemPolicy*"
 # with -V, left out with -Q too: file names or globs, '|' between them,
 # ignoring case, matched against the program, via and from (empty: none).
 DENIED_IGNORE=""
+
+# Whether TCC.db can be written here: yes, no, or empty (not known yet).
+# my-fda --install finds it out and records it in this machine'''s own
+# config; list reads it -- it never writes TCC.db to find out.
+TCC_DB_WRITABLE=""
 
 # Full Disk Access given by configuration profiles (MDM) -- listed, never
 # shown in System Settings.
@@ -398,7 +413,7 @@ CONFIG_KEYS="TCC_DB BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS 
 # KEY="value" lines, when it is there.
 read_site() {
   DATA_BASE_DIR="/var/db"; LOG_BASE_DIR="/var/log"
-  CONFIG_SEARCH_DIR=""; CONFIG_OFFER_DIR=""; CONFIG_OFFER_NOTE=""
+  CONFIG_SEARCH_DIR=""; CONFIG_OFFER_DIR=""; CONFIG_OFFER_NOTE=""; CONFIG_LOCAL_DIR=""
   [ -e "$SITE_CONF" ] || return 0
   # there but unreadable: an error, never the neutral values -- they would
   # keep this user's state apart from everyone else's
@@ -437,6 +452,14 @@ no_config_offer() {
   echo "    (--help: the full search order)"
 }
 
+# One config file over what is already set, and named in CONFIG_FILE.
+read_config() { # <FILE>
+  [ -r "$1" ] || err 00016 "config '$1' is not readable"
+  # shellcheck disable=SC1090  # the config path is chosen at runtime
+  . "$1" || err 00017 "config '$1' failed to load"
+  CONFIG_FILE="${CONFIG_FILE:+$CONFIG_FILE + }$1"
+}
+
 load_config() {
   read_site
   _cf="${MY_FDA_CONFIG:-$CONFIG_ARG}"
@@ -451,26 +474,35 @@ _EOF
     no_config_offer 1>&2
     exit 1
   fi
-  [ -r "$_cf" ] || err 00016 "config '$_cf' is not readable"
   # The defaults first, the file over them: a key an older config does not
   # set keeps its default, so a new key needs no edit on every machine. The
   # defaults still live in one place only, the text --create-config prints.
-  eval "$(default_config)" || err 00017 "the built-in defaults failed to load"
-  # shellcheck disable=SC1090  # the config path is chosen at runtime
-  . "$_cf" || err 00018 "config '$_cf' failed to load"
-  CONFIG_FILE="$_cf"
+  eval "$(default_config)" || err 00018 "the built-in defaults failed to load"
+  # Found through the site's search directory -- a farm linking into the
+  # trees -- the config is read from the trees: the global file, then this
+  # machine's, which wins key by key. Elsewhere, or with neither there,
+  # the file found.
+  CONFIG_FILE=""
+  if [ -z "${MY_FDA_CONFIG:-$CONFIG_ARG}" ] && [ -n "$CONFIG_SEARCH_DIR" ] && [ "${_cf%/*}" = "$CONFIG_SEARCH_DIR" ] \
+     && { [ -f "$CONFIG_OFFER_DIR/my-fda.conf" ] || [ -f "$CONFIG_LOCAL_DIR/my-fda.conf" ]; }; then
+    [ -z "$CONFIG_OFFER_DIR" ] || [ ! -f "$CONFIG_OFFER_DIR/my-fda.conf" ] || read_config "$CONFIG_OFFER_DIR/my-fda.conf"
+    [ -z "$CONFIG_LOCAL_DIR" ] || [ ! -f "$CONFIG_LOCAL_DIR/my-fda.conf" ] || read_config "$CONFIG_LOCAL_DIR/my-fda.conf"
+  else
+    read_config "$_cf"
+  fi
+  case "$TCC_DB_WRITABLE" in yes|no|"") ;; *) err 00019 "TCC_DB_WRITABLE='$TCC_DB_WRITABLE' in $CONFIG_FILE: yes, no or empty -- $US --install records it" ;; esac
   _miss=""
   for _k in $CONFIG_KEYS; do
     eval "_v=\${$_k:-}"
     [ -n "$_v" ] || _miss="$_miss $_k"
   done
-  [ -z "$_miss" ] || err 00019 "config '$_cf' sets these empty:$_miss -- '$US --create-config' shows their defaults"
+  [ -z "$_miss" ] || err 00020 "config '$CONFIG_FILE' sets these empty:$_miss -- '$US --create-config' shows their defaults"
 }
 
 create_config() { # [FILE]
   if [ -z "$1" ]; then default_config; return 0; fi
-  [ -e "$1" ] && err 00020 "'$1' exists -- not overwritten"
-  default_config > "$1" || err 00021 "cannot write '$1'"
+  [ -e "$1" ] && err 00021 "'$1' exists -- not overwritten"
+  default_config > "$1" || err 00022 "cannot write '$1'"
   msg " >>> default config written to $1"
 }
 
@@ -521,7 +553,7 @@ grant_flag() { # <PATH>
 # never an empty field ("-"): a TAB is IFS whitespace, and read would
 # collapse two of them into one.
 classify() {
-  _spot=""; _wr=""
+  _spot=""
   while IFS="$TAB" read -r _sv _t _c _a _d; do
     [ -n "$_c" ] || continue
     case "$_a" in
@@ -568,11 +600,14 @@ classify() {
           com.apple.*) _n="app (Apple's own, not found by Spotlight or LaunchServices: kept)" ;;
           *)
             # what remove can do with it: tccutil does not know a gone app,
-            # so only sqlite takes it -- where TCC.db cannot be written it
-            # stays, and the pane does not show it either
-            if [ -z "$_wr" ]; then if tcc_writable; then _wr=yes; else _wr=no; fi; fi
-            if [ "$_wr" = "yes" ]; then _n="GONE $TO_REMOVE"
-            else _n="GONE: stays -- TCC.db cannot be written here, and the grant applies to nothing"; fi ;;
+            # so only sqlite takes it -- where TCC.db cannot be written
+            # (TCC_DB_WRITABLE, recorded by --install) it stays, and the pane
+            # does not show it either
+            case "$TCC_DB_WRITABLE" in
+              yes) _n="GONE $TO_REMOVE" ;;
+              no)  _n="GONE: stays -- TCC.db cannot be written here (TCC_DB_WRITABLE), and the grant applies to nothing" ;;
+              *)   _n="GONE $TO_REMOVE (whether it can: $US --install)" ;;
+            esac ;;
         esac
       fi
     else
@@ -621,15 +656,15 @@ summary() {
 
 # Every Full Disk Access grant, classified, into <FILE>.
 grants_to() { # <FILE>
-  [ -x "$c_sqlite3" ] || err 00022 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
+  [ -x "$c_sqlite3" ] || err 00023 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
   if ! "$c_sqlite3" -readonly -separator "$TAB" "$TCC_DB" \
        "select service, client_type, client, auth_value, datetime(last_modified,'unixepoch','localtime') from access where service in ('$SERVICE', '$SERVICE_ES') order by client;" \
        > "$WORK/rows" 2> "$WORK/rows.err"; then
     _e=$(cat "$WORK/rows.err")
     case "$_e" in
       *"authorization denied"*|*"unable to open"*)
-        err 00023 "cannot read '$TCC_DB' ($_e) -- the Terminal running this needs Full Disk Access itself" ;;
-      *) err 00024 "sqlite3 failed on '$TCC_DB': $_e" ;;
+        err 00024 "cannot read '$TCC_DB' ($_e) -- the Terminal running this needs Full Disk Access itself" ;;
+      *) err 00025 "sqlite3 failed on '$TCC_DB': $_e" ;;
     esac
   fi
   mdm_rows >> "$WORK/rows"
@@ -665,13 +700,13 @@ sql_q() { printf '%s' "$1" | sed "s/'/''/g"; }
 # holds the file open, and a copy can be torn.
 backup_tcc() {
   [ -n "$BACKUP_STAMP" ] || BACKUP_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p "$BACKUP_DIR" || err 00025 "cannot create BACKUP_DIR '$BACKUP_DIR'"
-  chmod 700 "$BACKUP_DIR" || err 00026 "cannot chmod 700 '$BACKUP_DIR'"
+  mkdir -p "$BACKUP_DIR" || err 00026 "cannot create BACKUP_DIR '$BACKUP_DIR'"
+  chmod 700 "$BACKUP_DIR" || err 00027 "cannot chmod 700 '$BACKUP_DIR'"
   BACKUP_FILE="$BACKUP_DIR/TCC.db.$BACKUP_STAMP"
   [ -e "$BACKUP_FILE" ] && BACKUP_FILE="$BACKUP_FILE.$$"
   run "$c_sqlite3" "$TCC_DB" ".backup '$BACKUP_FILE'" \
-    || err 00027 "backup of '$TCC_DB' to '$BACKUP_FILE' failed -- nothing was changed"
-  [ -s "$BACKUP_FILE" ] || err 00028 "backup '$BACKUP_FILE' is empty -- nothing was changed"
+    || err 00028 "backup of '$TCC_DB' to '$BACKUP_FILE' failed -- nothing was changed"
+  [ -s "$BACKUP_FILE" ] || err 00029 "backup '$BACKUP_FILE' is empty -- nothing was changed"
 }
 
 # Can this process write TCC.db? Not everywhere, even as root with Full Disk
@@ -681,6 +716,52 @@ backup_tcc() {
 # or sqlite's refusal, is left in $WORK/probe.
 tcc_writable() {
   "$c_sqlite3" "$TCC_DB" "BEGIN IMMEDIATE; DELETE FROM access WHERE 0; ROLLBACK;" > "$WORK/probe" 2>&1
+}
+
+# --install: what this machine lets my-fda do, found out once and recorded in
+# its config, so that no other run has to try -- today whether TCC.db can be
+# written (TCC_DB_WRITABLE, which list reads). The answer is this machine's:
+# it goes into the site's local config directory (CONFIG_LOCAL_DIR, from the
+# site file), else into the config that was read, and is committed where that
+# is a git tree. The test is a real write (tcc_writable): macOS refuses it
+# once, here, instead of on every list.
+cmd_install() {
+  [ -x "$c_git" ] || err 00030 "c_git='$c_git' is not executable (config: $CONFIG_FILE) -- --install commits what it records"
+  if tcc_writable; then _v=yes; _why="allowed"
+  else _v=no; _why="refused ($(head -n 1 "$WORK/probe"))"; fi
+  if [ -n "$CONFIG_LOCAL_DIR" ]; then _f="$CONFIG_LOCAL_DIR/my-fda.conf"; else _f="${CONFIG_FILE##* + }"; fi
+  _was=""
+  [ -f "$_f" ] && _was=$(sed -n 's/^TCC_DB_WRITABLE=//p' "$_f" | tr -d "\"'" | tail -n 1)
+  if [ "$_was" = "$_v" ]; then
+    msg " >>> TCC.db write test: $_why -> TCC_DB_WRITABLE=$_v already recorded in $_f"
+    return 0
+  fi
+  _d="${_f%/*}"
+  [ -d "$_d" ] || err 00031 "no directory '$_d' for this machine's config -- CONFIG_LOCAL_DIR in $SITE_CONF"
+  if [ -f "$_f" ]; then
+    _how="was ${_was:-not set}"
+    cp -p "$_f" "$_f.new" || err 00032 "cannot write '$_f.new'"
+    awk -v v="$_v" '
+      /^TCC_DB_WRITABLE=/ { if (!d) print "TCC_DB_WRITABLE=" v; d = 1; next }
+      { print }
+      END { if (!d) { print ""; print "# whether TCC.db can be written here: recorded by my-fda --install"; print "TCC_DB_WRITABLE=" v } }' "$_f" > "$_f.new" \
+      || err 00033 "cannot write '$_f.new'"
+  else
+    _how="created"
+    printf '%s\n' "# my-fda: this machine's own values, read after the global config" \
+      "# whether TCC.db can be written here: recorded by my-fda --install" "TCC_DB_WRITABLE=$_v" > "$_f.new" \
+      || err 00034 "cannot write '$_f.new'"
+  fi
+  mv -f "$_f.new" "$_f" || err 00035 "cannot replace '$_f'"
+  _c=""
+  if "$c_git" -C "$_d" rev-parse --git-dir > /dev/null 2>&1; then
+    if ! { "$c_git" -C "$_d" add -- "${_f##*/}" > "$WORK/git" 2>&1 \
+      && "$c_git" -C "$_d" commit -q -m "my-fda --install: TCC_DB_WRITABLE=$_v (the TCC.db write test, $_v)" -- "${_f##*/}" >> "$WORK/git" 2>&1; }; then
+      err 00036 "TCC_DB_WRITABLE=$_v written to $_f, but not committed: $(tail -n 1 "$WORK/git")"
+    fi
+    _c=", committed"
+  fi
+  msg " >>> TCC.db write test: $_why -> TCC_DB_WRITABLE=$_v recorded in $_f ($_how)$_c"
 }
 
 # The grants of <FILE> (classified lines) that are still there, read afresh.
@@ -752,9 +833,9 @@ take_away() { # <FILE>
   fi
   if [ "$REMAINING" != "0" ]; then
     render < "$WORK/left" | sed 's/^/    /' 1>&2
-    err 00029 "$REMAINING grant(s) still there $TOOK -- TCC.db backup: $BACKUP_FILE"
+    err 00037 "$REMAINING grant(s) still there $TOOK -- TCC.db backup: $BACKUP_FILE"
   fi
-  [ -s "$WORK/other" ] && err 00030 "$(wc -l < "$WORK/other" | tr -d ' ') grant(s) taken away that were not asked for -- see above; TCC.db backup: $BACKUP_FILE"
+  [ -s "$WORK/other" ] && err 00038 "$(wc -l < "$WORK/other" | tr -d ' ') grant(s) taken away that were not asked for -- see above; TCC.db backup: $BACKUP_FILE"
   return 0
 }
 
@@ -824,7 +905,7 @@ sqlite_delete() { # <FILE>
   {
     echo "BEGIN;"
     while IFS="$TAB" read -r _i _t _c _rest; do
-      case "$_t" in ""|*[!0-9]*) err 00031 "client type '$_t' of '$_c' is not a number -- nothing was changed" ;; esac
+      case "$_t" in ""|*[!0-9]*) err 00039 "client type '$_t' of '$_c' is not a number -- nothing was changed" ;; esac
       printf "DELETE FROM access WHERE service='%s' AND client_type=%s AND client='%s';\n" "$SERVICE" "$_t" "$(sql_q "$_c")"
     done < "$1"
     echo "COMMIT;"
@@ -838,10 +919,10 @@ sqlite_delete() { # <FILE>
   PHASE="deleting grants -- one transaction: it landed whole or not at all; TCC.db backup: $BACKUP_FILE"
   [ "$VRB" = "1" ] && printf ' >>> %s -bail %s < %s\n' "$c_sqlite3" "$TCC_DB" "$_sql"
   _out=$("$c_sqlite3" -bail "$TCC_DB" < "$_sql" 2>&1) \
-    || err 00032 "sqlite3 delete failed: $_out -- the transaction did not land; backup: $BACKUP_FILE"
+    || err 00040 "sqlite3 delete failed: $_out -- the transaction did not land; backup: $BACKUP_FILE"
   DELETED=$(printf '%s\n' "$_out" | sed -n 1p)
   REMAINING=$(printf '%s\n' "$_out" | sed -n 2p)
-  [ "$REMAINING" = "0" ] || err 00033 "grants still there after the delete [rows deleted $DELETED, remaining $REMAINING] -- backup: $BACKUP_FILE"
+  [ "$REMAINING" = "0" ] || err 00041 "grants still there after the delete [rows deleted $DELETED, remaining $REMAINING] -- backup: $BACKUP_FILE"
   run "$c_killall" tccd > /dev/null 2>&1 \
     || warn "    > could not restart tccd ($c_killall tccd) -- it may show the old grants until it restarts"
 }
@@ -864,7 +945,7 @@ list_off() { # <PATH> <client type> <client>
   backup_tcc
   PHASE="listing $1 switched off -- TCC.db backup: $BACKUP_FILE"
   "$c_sqlite3" -readonly "$TCC_DB" "select name from pragma_table_info('access');" > "$WORK/cols" \
-    || err 00034 "cannot read the columns of $TCC_DB's access table -- nothing was changed"
+    || err 00042 "cannot read the columns of $TCC_DB's access table -- nothing was changed"
   _cols="service, client, client_type, auth_value"
   _vals="'$SERVICE', '$(sql_q "$3")', $2, 0"
   for _cv in "auth_reason:3" "auth_version:1" "flags:0" "last_modified:CAST(strftime('%s','now') AS INTEGER)"; do
@@ -880,13 +961,13 @@ list_off() { # <PATH> <client type> <client>
   fi
   [ "$VRB" = "1" ] && printf ' >>> %s %s "insert into access (%s) ..."\n' "$c_sqlite3" "$TCC_DB" "$_cols"
   "$c_sqlite3" -bail "$TCC_DB" "INSERT INTO access ($_cols) VALUES ($_vals);" > "$WORK/insert.out" 2>&1 \
-    || err 00035 "cannot list $1 in TCC.db: $(cat "$WORK/insert.out") -- backup: $BACKUP_FILE"
+    || err 00043 "cannot list $1 in TCC.db: $(cat "$WORK/insert.out") -- backup: $BACKUP_FILE"
   run "$c_killall" tccd > /dev/null 2>&1 \
     || warn "    > could not restart tccd ($c_killall tccd) -- the pane may show it only after a restart"
 }
 
 cmd_list() {
-  [ $# -eq 0 ] || err 00036 "list takes no arguments"
+  [ $# -eq 0 ] || err 00044 "list takes no arguments"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
   render < "$WORK/all"
@@ -898,7 +979,7 @@ cmd_list() {
 # applies to THEM. Sets SCREEN_USER; nobody at the screen (or root): the
 # "others" bit decides.
 screen_user_can() { # <r|x> <PATH>
-  case "$1" in r) _off=0 ;; x) _off=2 ;; *) err 00037 "screen_user_can: '$1' is neither r nor x" ;; esac
+  case "$1" in r) _off=0 ;; x) _off=2 ;; *) err 00045 "screen_user_can: '$1' is neither r nor x" ;; esac
   _su=$(/bin/ls -ln /dev/console 2>/dev/null | awk '{ print $3 }')
   # shellcheck disable=SC2012  # only the MODE, owner and group columns are read, never a name
   set -- "$1" "$(ls -ld "$2" | cut -c1-10)" "$(ls -lnd "$2" | awk '{ print $3 " " $4 }')"
@@ -916,10 +997,10 @@ screen_user_can() { # <r|x> <PATH>
 }
 
 cmd_add() { # <PATH>
-  [ $# -eq 1 ] || err 00038 "add takes one path: $US add <PATH>"
+  [ $# -eq 1 ] || err 00046 "add takes one path: $US add <PATH>"
   _p=$1
   case "$_p" in /*) ;; *) _p="$(pwd)/$_p" ;; esac
-  [ -e "$_p" ] || err 00039 "'$_p' does not exist"
+  [ -e "$_p" ] || err 00047 "'$_p' does not exist"
   _r=$(real_path "$_p")
   if [ "$_r" != "$_p" ]; then
     msg "    > $_p is $_r -- macOS records the grant under that path"
@@ -944,27 +1025,27 @@ cmd_add() { # <PATH>
     esac
   fi
   case "$_p" in "$HELPER_DIR"/my-fda.*)
-    err 00040 "'$_p' is named with a dot: macOS takes it for a document, and the pane cannot add it -- $US destroy go ${_p##*/my-fda.}, then $US create (it is named my-fda-<NAME> now)" ;;
+    err 00048 "'$_p' is named with a dot: macOS takes it for a document, and the pane cannot add it -- $US destroy go ${_p##*/my-fda.}, then $US create (it is named my-fda-<NAME> now)" ;;
   esac
   # System Settings runs as the screen's user and must READ the file to add
   # it -- a file that user cannot read is refused there without a word
   if ! screen_user_can r "$_p"; then
     case "$_p" in
       "$HELPER_DIR"/my-fda-*)
-        run chmod 744 "$_p" || err 00041 "cannot make '$_p' readable (chmod 744)"
+        run chmod 744 "$_p" || err 00049 "cannot make '$_p' readable (chmod 744)"
         msg "    > $_p made readable (744): System Settings, running as you, reads it to add it" ;;
-      *) err 00042 "'$_p' is not readable by the screen's user ($SCREEN_USER) -- System Settings runs as that user and cannot add it: chmod a+r '$_p' first" ;;
+      *) err 00050 "'$_p' is not readable by the screen's user ($SCREEN_USER) -- System Settings runs as that user and cannot add it: chmod a+r '$_p' first" ;;
     esac
   fi
   if [ "$_listed" = "0" ] && list_off "$_p" "$_add_t" "$_add_c"; then
     _listed=1
     msg "    > $_p put into the list, switched OFF [TCC.db backup: $BACKUP_FILE]"
   fi
-  gui_open "$FDA_PANE_URL" || err 00043 "could not open the Full Disk Access pane ($FDA_PANE_URL)"
+  gui_open "$FDA_PANE_URL" || err 00051 "could not open the Full Disk Access pane ($FDA_PANE_URL)"
   if [ "$_listed" = "1" ]; then
     say " >>> Full Disk Access is open: switch ${_p##*/} ON there"
   else
-    gui_open -R "$_p" || err 00044 "could not show '$_p' in Finder"
+    gui_open -R "$_p" || err 00052 "could not show '$_p' in Finder"
     say " >>> Full Disk Access is open, and $_p is selected in Finder (TCC.db cannot be written here):"
     # The pane silently loses a dragged-in program the screen's user cannot
     # execute (macOS 27, 2026-10-26: 744 lost, 755 taken); + takes it.
@@ -986,7 +1067,7 @@ cmd_add() { # <PATH>
     read -r _x < "$TTY"
     grants_to "$WORK/all"
     awk -F '\t' -v t="$_add_t" -v c="$_add_c" '$2 == t && $3 == c && $4 == "allowed[2]"' "$WORK/all" > "$WORK/row"
-    [ -s "$WORK/row" ] || err 00045 "'$_add_c' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- add it with + and switch it on, then $US list"
+    [ -s "$WORK/row" ] || err 00053 "'$_add_c' is not in the list as allowed yet [grants $(wc -l < "$WORK/all" | tr -d ' ')] -- add it with + and switch it on, then $US list"
     msg "granted:"; render < "$WORK/row" | sed 's/^/    /'
   else
     say "--> then check: $US list"
@@ -1000,14 +1081,14 @@ ids_to() { # <FILE> [ID...]
   if [ $# -gt 0 ]; then
     printf '%s\n' "$@" > "$_f"
   elif [ -t 0 ]; then
-    err 00046 "no IDs: give them as arguments, or pipe them in ($US list | grep ... | cut -f 1 | $US remove)"
+    err 00054 "no IDs: give them as arguments, or pipe them in ($US list | grep ... | cut -f 1 | $US remove)"
   else
     awk 'NF { print $1 }' > "$_f"
   fi
   while IFS= read -r _i; do
     case "$_i" in
       [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-      *) err 00047 "'$_i' is not an ID -- IDs are the first column of '$US list' -- nothing was changed" ;;
+      *) err 00055 "'$_i' is not an ID -- IDs are the first column of '$US list' -- nothing was changed" ;;
     esac
   done < "$_f"
 }
@@ -1017,7 +1098,7 @@ ids_to() { # <FILE> [ID...]
 cmd_remove() { # [go] [ID...]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
   if [ "$RECOMMENDED" = "1" ]; then
-    [ $# -eq 0 ] || err 00048 "remove --recommended takes no IDs -- it takes what '$US list' marks '$TO_REMOVE'"
+    [ $# -eq 0 ] || err 00056 "remove --recommended takes no IDs -- it takes what '$US list' marks '$TO_REMOVE'"
     PHASE="reading the grants -- nothing was changed"
     grants_to "$WORK/all"
     awk -F '\t' -v m="$TO_REMOVE" 'index($5, m)' "$WORK/all" > "$WORK/sel"
@@ -1035,14 +1116,14 @@ cmd_remove() { # [go] [ID...]
     while IFS= read -r _i; do
       _m=$(awk -F '\t' -v i="$_i" '$1 == i' "$WORK/all")
       [ -n "$_m" ] || { _bad="$_bad $_i"; continue; }
-      [ "$(printf '%s\n' "$_m" | wc -l | tr -d ' ')" = "1" ] || err 00049 "ID $_i matches more than one grant -- nothing was changed; remove those in System Settings"
+      [ "$(printf '%s\n' "$_m" | wc -l | tr -d ' ')" = "1" ] || err 00057 "ID $_i matches more than one grant -- nothing was changed; remove those in System Settings"
       grep -qxF "$_m" "$WORK/sel" || printf '%s\n' "$_m" >> "$WORK/sel"
     done < "$WORK/ids"
-    [ -z "$_bad" ] || err 00050 "no such grant:$_bad -- nothing was changed ($US list shows the IDs)"
+    [ -z "$_bad" ] || err 00058 "no such grant:$_bad -- nothing was changed ($US list shows the IDs)"
     _again="'$US remove go' with the same IDs"
   fi
   _not=$(awk -F '\t' '$5 ~ /^(system extension|profile)/ { printf " %s", $1 }' "$WORK/sel")
-  [ -z "$_not" ] || err 00051 "not taken away by $US:$_not -- a system extension's grant goes in System Settings, a profile's with the profile; nothing was changed"
+  [ -z "$_not" ] || err 00059 "not taken away by $US:$_not -- a system extension's grant goes in System Settings, a profile's with the profile; nothing was changed"
   _k=$(wc -l < "$WORK/sel" | tr -d ' ')
   render < "$WORK/sel"
   if [ "$_go" = "0" ]; then
@@ -1057,7 +1138,7 @@ cmd_remove() { # [go] [ID...]
 # is left that the grant could apply to. The same delete path as remove.
 cmd_cleanup() { # [go]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 0 ] || err 00052 "cleanup takes no IDs -- '$US remove' takes some"
+  [ $# -eq 0 ] || err 00060 "cleanup takes no IDs -- '$US remove' takes some"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
   awk -F '\t' '$5 ~ /^GONE/' "$WORK/all" > "$WORK/sel"
@@ -1077,7 +1158,7 @@ cmd_cleanup() { # [go]
 
 cmd_reset() { # [go]
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 0 ] || err 00053 "reset takes no IDs -- '$US remove' takes some"
+  [ $# -eq 0 ] || err 00061 "reset takes no IDs -- '$US remove' takes some"
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/every"
   ours < "$WORK/every" > "$WORK/all"
@@ -1091,15 +1172,15 @@ cmd_reset() { # [go]
     return 0
   fi
   BACKUP_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-  mkdir -p "$BACKUP_DIR" || err 00054 "cannot create BACKUP_DIR '$BACKUP_DIR'"
+  mkdir -p "$BACKUP_DIR" || err 00062 "cannot create BACKUP_DIR '$BACKUP_DIR'"
   _l="$BACKUP_DIR/list.$BACKUP_STAMP.txt"
-  VRB=1 render < "$WORK/all" > "$_l" || err 00055 "cannot save the list to '$_l' -- nothing was changed"
+  VRB=1 render < "$WORK/all" > "$_l" || err 00063 "cannot save the list to '$_l' -- nothing was changed"
   backup_tcc
   # macOS's own bulk command: no app lookup, no writable TCC.db needed.
   PHASE="taking all grants away -- TCC.db backup: $BACKUP_FILE, the list: $_l"
   [ "$VRB" = "1" ] && printf ' >>> %s reset SystemPolicyAllFiles\n' "$c_tccutil"
   "$c_tccutil" reset SystemPolicyAllFiles < /dev/null > "$WORK/tccutil.out" 2>&1; _rc=$?
-  [ "$_rc" = "0" ] || err 00056 "tccutil reset SystemPolicyAllFiles failed [rc $_rc]: $(cat "$WORK/tccutil.out") -- backup: $BACKUP_FILE"
+  [ "$_rc" = "0" ] || err 00064 "tccutil reset SystemPolicyAllFiles failed [rc $_rc]: $(cat "$WORK/tccutil.out") -- backup: $BACKUP_FILE"
   msg "took away all $_k grant(s) [tccutil rc $_rc] -- TCC.db backup: $BACKUP_FILE, the list: $_l"
   msg "    > not checked here: this Terminal lost its grant too -- give it back, then $US list"
   msg " >>> to give back what had been allowed:"
@@ -1494,49 +1575,49 @@ render_refusals() { # <grants FILE>
 check_time() { # <OPTION> <TIME>
   case "$2" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\ [0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ;;
-    *) err 00057 "$1 '$2': a local time, YYYY-MM-DD HH:MM:SS (2026-11-12 08:15:00)" ;;
+    *) err 00065 "$1 '$2': a local time, YYYY-MM-DD HH:MM:SS (2026-11-12 08:15:00)" ;;
   esac
   _ct=$("$c_date" -j -f '%Y-%m-%d %H:%M:%S' "$2" '+%Y-%m-%d %H:%M:%S' 2>&1)
-  [ "$_ct" = "$2" ] || err 00058 "$1 '$2': no such time [$c_date reads it as '$_ct']"
+  [ "$_ct" = "$2" ] || err 00066 "$1 '$2': no such time [$c_date reads it as '$_ct']"
 }
 
 cmd_denied() { # [PROGRAM] [LAST]
   _prog=""; _last=""
   for _a in "$@"; do
     case "$_a" in
-      boot|[0-9]*) [ -z "$_last" ] || err 00059 "two windows, '$_last' and '$_a' -- usage: $US denied [<PROGRAM>] [<LAST>]"; _last=$_a ;;
-      *)           [ -z "$_prog" ] || err 00060 "two programs, '$_prog' and '$_a' -- usage: $US denied [<PROGRAM>] [<LAST>]"; _prog=$_a ;;
+      boot|[0-9]*) [ -z "$_last" ] || err 00067 "two windows, '$_last' and '$_a' -- usage: $US denied [<PROGRAM>] [<LAST>]"; _last=$_a ;;
+      *)           [ -z "$_prog" ] || err 00068 "two programs, '$_prog' and '$_a' -- usage: $US denied [<PROGRAM>] [<LAST>]"; _prog=$_a ;;
     esac
   done
   if [ "$CATCH" = "1" ]; then
-    [ -z "$_last" ] && [ -z "$SINCE_ARG" ] && [ -z "$UNTIL_ARG" ] || err 00061 "denied --catch takes no LAST, --since or --until -- it waits for the next refusal"
+    [ -z "$_last" ] && [ -z "$SINCE_ARG" ] && [ -z "$UNTIL_ARG" ] || err 00069 "denied --catch takes no LAST, --since or --until -- it waits for the next refusal"
     catch_refusal "$_prog"; return
   fi
-  [ -z "$UNTIL_ARG" ] || [ -n "$SINCE_ARG" ] || err 00062 "--until '$UNTIL_ARG' goes with --since -- the window it ends starts there"
+  [ -z "$UNTIL_ARG" ] || [ -n "$SINCE_ARG" ] || err 00070 "--until '$UNTIL_ARG' goes with --since -- the window it ends starts there"
   if [ -n "$SINCE_ARG" ]; then
-    [ -z "$_last" ] || err 00063 "two windows, '$_last' and --since '$SINCE_ARG' -- usage: $US denied [<PROGRAM>] [<LAST> | --since <TIME> [--until <TIME>]]"
+    [ -z "$_last" ] || err 00071 "two windows, '$_last' and --since '$SINCE_ARG' -- usage: $US denied [<PROGRAM>] [<LAST> | --since <TIME> [--until <TIME>]]"
     check_time --since "$SINCE_ARG"
     set -- --start "$SINCE_ARG"; _of="since $SINCE_ARG"; _in=$_of
     if [ -n "$UNTIL_ARG" ]; then
       check_time --until "$UNTIL_ARG"
       # both are YYYY-MM-DD HH:MM:SS: as strings they compare as times
-      [ "$UNTIL_ARG" \< "$SINCE_ARG" ] && err 00064 "--until '$UNTIL_ARG' is before --since '$SINCE_ARG'"
+      [ "$UNTIL_ARG" \< "$SINCE_ARG" ] && err 00072 "--until '$UNTIL_ARG' is before --since '$SINCE_ARG'"
       set -- --start "$SINCE_ARG" --end "$UNTIL_ARG"; _of="from $SINCE_ARG to $UNTIL_ARG"; _in=$_of
     fi
   else
     _last="${_last:-$DENIED_LAST_DEFAULT}"
     case "$_last" in
       boot) ;;
-      ""|[!0-9]*|*[!0-9mhd]*|*[mhd]?*) err 00065 "LAST='$_last': a number with m, h or d (30m, 2h, 3d), or boot -- what log show --last takes" ;;
+      ""|[!0-9]*|*[!0-9mhd]*|*[mhd]?*) err 00073 "LAST='$_last': a number with m, h or d (30m, 2h, 3d), or boot -- what log show --last takes" ;;
     esac
     set -- --last "$_last"; _of="of the last $_last"; _in="in the last $_last"
   fi
-  [ -x "$c_log" ] || err 00066 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
+  [ -x "$c_log" ] || err 00074 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
   refusal_scope "$_prog"
   PHASE="reading the system log -- nothing was changed"
   msg " >>> tccd's checks in the system log $_of ($_scope) -- a long window takes a while"
   run "$c_log" show --style compact "$@" --predicate "$REFUSAL_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
-    || err 00067 "log show failed: $(cat "$WORK/log.err")"
+    || err 00075 "log show failed: $(cat "$WORK/log.err")"
   # what was read, raw: tccd's answers, and the kernel's refusals when any
   _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ } $4 ~ /^kernel\[/ && / System Policy: [^(]+\([0-9]+\) deny\(/ { k++ }
     END { printf "%d%s", n, (k ? "; kernel refusals read: " k : "") }' "$WORK/log")
@@ -1578,12 +1659,12 @@ cmd_denied() { # [PROGRAM] [LAST]
 # no responsible parent. Ends after the first whose process could still be
 # seen, or on Ctrl-C.
 catch_refusal() { # [PROGRAM]
-  [ -x "$c_log" ] || err 00068 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
+  [ -x "$c_log" ] || err 00076 "c_log='$c_log' is not executable (config: $CONFIG_FILE)"
   refusal_scope "${1:-}"
   PHASE="waiting for the next refusal -- nothing was changed"
   msg " >>> waiting for the next refused check ($_scope), then its process, parents and open files (Ctrl-C to stop)"
   "$c_log" stream --style compact --predicate "$REFUSAL_PREDICATE" 2> "$WORK/log.err" | refusals catch "$_progarg" | tee "$WORK/caught"
-  [ -s "$WORK/caught" ] || err 00069 "log stream ended with no refusal: $(cat "$WORK/log.err")"
+  [ -s "$WORK/caught" ] || err 00077 "log stream ended with no refusal: $(cat "$WORK/log.err")"
 }
 
 ############################################################## launchers
@@ -1675,7 +1756,7 @@ static int become_user(void) {
             }
         }
     }
-    fprintf(stderr, "ERROR 00070 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_AS
+    fprintf(stderr, "ERROR 00078 [70]: my-fda-" MY_FDA_NAME ": cannot run as " MY_FDA_AS
             " (%s: %s) -- its LaunchDaemon must start it as root\n", step, errno ? strerror(errno) : "no such user or group");
     return 0;
 }
@@ -1692,7 +1773,7 @@ int main(int argc, char **argv) {
 
     (void)argc;
     if (getuid() != MY_FDA_RUN_UID) {
-        fprintf(stderr, "ERROR 00071 [77]: my-fda-" MY_FDA_NAME ": runs only as root, started by its"
+        fprintf(stderr, "ERROR 00079 [77]: my-fda-" MY_FDA_NAME ": runs only as root, started by its"
                 " LaunchDaemon -- not as uid %d\n", (int)getuid());
         return 77;
     }
@@ -1706,7 +1787,7 @@ int main(int argc, char **argv) {
 
     rc = posix_spawn(&pid, MY_FDA_TARGET, NULL, NULL, argv, environ);
     if (rc != 0) {
-        fprintf(stderr, "ERROR 00072 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
+        fprintf(stderr, "ERROR 00080 [70]: my-fda-" MY_FDA_NAME ": cannot start %s: %s\n",
                 MY_FDA_TARGET, strerror(rc));
         return 70;
     }
@@ -1714,7 +1795,7 @@ int main(int argc, char **argv) {
 
     while (waitpid(pid, &st, 0) < 0) {
         if (errno != EINTR) {
-            fprintf(stderr, "ERROR 00073 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
+            fprintf(stderr, "ERROR 00081 [70]: my-fda-" MY_FDA_NAME ": waitpid: %s\n", strerror(errno));
             return 70;
         }
     }
@@ -1746,7 +1827,7 @@ launcher_path() { # <NAME>
 
 check_name() { # <NAME>
   case "$1" in
-    ""|*[!A-Za-z0-9._-]*) err 00074 "name '$1': letters, digits, '.', '_' and '-' only" ;;
+    ""|*[!A-Za-z0-9._-]*) err 00082 "name '$1': letters, digits, '.', '_' and '-' only" ;;
   esac
 }
 
@@ -1775,65 +1856,65 @@ cmd_create() { # [NAME] <TARGET>
     1) set -- "$(name_of "$1")" "$1"
        msg "    > NAME $1, from the target's file name -- $US create <NAME> <TARGET> chooses another" ;;
     2) ;;
-    *) err 00075 "usage: $US create [<NAME>] <TARGET>" ;;
+    *) err 00083 "usage: $US create [<NAME>] <TARGET>" ;;
   esac
   check_name "$1"
-  case "$1" in *.*) err 00076 "name '$1': no '.' -- my-fda-$1 would look like a document, and the pane cannot add it" ;; esac
+  case "$1" in *.*) err 00084 "name '$1': no '.' -- my-fda-$1 would look like a document, and the pane cannot add it" ;; esac
   _t=$2
   _l=$(launcher_path "$1")
-  case "$_t" in /*) ;; *) err 00077 "target '$_t' must be an absolute path" ;; esac
-  case "$_t" in *\"*|*\\*) err 00078 "target '$_t': no '\"' or '\\' in the path" ;; esac
-  [ -f "$_t" ] && [ -x "$_t" ] || err 00079 "target '$_t' is not an executable file"
+  case "$_t" in /*) ;; *) err 00085 "target '$_t' must be an absolute path" ;; esac
+  case "$_t" in *\"*|*\\*) err 00086 "target '$_t': no '\"' or '\\' in the path" ;; esac
+  [ -f "$_t" ] && [ -x "$_t" ] || err 00087 "target '$_t' is not an executable file"
   for _cel in $BREW_CELLARS; do
     case "$_t" in "$_cel"/*)
-      err 00080 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
+      err 00088 "target '$_t' is a Homebrew version path: it changes on upgrade -- use its stable path, /opt/homebrew/bin/${_t##*/}" ;;
     esac
   done
   for _sh in $SHELLS; do
-    [ "$_t" = "$_sh" ] && err 00081 "target '$_t' is a shell: every script it runs would get full disk access"
+    [ "$_t" = "$_sh" ] && err 00089 "target '$_t' is a shell: every script it runs would get full disk access"
   done
   if [ -n "$USER_ARG" ]; then
-    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00082 "--user '$USER_ARG': not a user name" ;; esac
-    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00083 "--user '$USER_ARG': no such user on this machine"
-    [ "$_uid" != "0" ] || err 00084 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
+    case "$USER_ARG" in (*[!A-Za-z0-9._-]*) err 00090 "--user '$USER_ARG': not a user name" ;; esac
+    _uid=$(id -u "$USER_ARG" 2>/dev/null) || err 00091 "--user '$USER_ARG': no such user on this machine"
+    [ "$_uid" != "0" ] || err 00092 "--user $USER_ARG: that is root -- leave --user out, a launcher runs as root anyway"
   fi
   if [ -n "$GROUP_ARG" ]; then
-    [ -n "$USER_ARG" ] || err 00085 "--group goes with --user: it is the primary group the launcher takes when it becomes that user"
-    case "$GROUP_ARG" in (*[!A-Za-z0-9._-]*) err 00086 "--group '$GROUP_ARG': not a group name" ;; esac
+    [ -n "$USER_ARG" ] || err 00093 "--group goes with --user: it is the primary group the launcher takes when it becomes that user"
+    case "$GROUP_ARG" in (*[!A-Za-z0-9._-]*) err 00094 "--group '$GROUP_ARG': not a group name" ;; esac
     "$c_dscl" . -read "/Groups/$GROUP_ARG" PrimaryGroupID > /dev/null 2>&1 \
-      || err 00087 "--group '$GROUP_ARG': no such group on this machine"
+      || err 00095 "--group '$GROUP_ARG': no such group on this machine"
   fi
-  [ -e "$_l" ] && err 00088 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
+  [ -e "$_l" ] && err 00096 "'$_l' exists -- a rebuild loses its grant; to rebuild on purpose: $US destroy go $1, then create"
   if ! { [ -x "$c_cc" ] && "$c_xcode_select" -p > /dev/null 2>&1; }; then
-    err 00089 "no compiler: needs the Command Line Tools -- xcode-select --install"
+    err 00097 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
     if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00090 "cannot create '$HELPER_DIR'"
+    else run install -d -m 755 "$HELPER_DIR"; fi || err 00098 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
   run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" "-DMY_FDA_RUN_UID=$LAUNCHER_UID" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} ${GROUP_ARG:+"-DMY_FDA_GROUP=\"$GROUP_ARG\""} \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
-    || err 00091 "cc failed: $(cat "$WORK/cc.log")"
+    || err 00099 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
-    || err 00092 "the built launcher does not carry its target marker -- not installed"
+    || err 00100 "the built launcher does not carry its target marker -- not installed"
   [ "$(user_of "$WORK/launcher")" = "$USER_ARG" ] \
-    || err 00093 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
+    || err 00101 "the built launcher does not carry its user marker ($USER_ARG) -- not installed"
   [ "$(group_of "$WORK/launcher")" = "$GROUP_ARG" ] \
-    || err 00094 "the built launcher does not carry its group marker ($GROUP_ARG) -- not installed"
+    || err 00102 "the built launcher does not carry its group marker ($GROUP_ARG) -- not installed"
   # cc only linker-signs, under the temp file's name: the Full Disk Access
   # pane takes such a file with + but loses it when dragged in (macOS 27,
   # 2026-10-26). A program with a real ad-hoc signature under its own name
   # is dragged in like any other program.
   run "$c_codesign" -s - -f -o runtime -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
-    || err 00095 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
+    || err 00103 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
   # 755: System Settings, running as the screen's user, loses a dragged-in
   # program that user cannot execute (2026-10-26); the launcher itself
   # refuses to run as anyone but root, so executing it grants nothing
   if [ "$(id -u)" = "0" ]; then run install -m 755 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00096 "cannot install '$_l'"
+  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00104 "cannot install '$_l'"
   msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG${GROUP_ARG:+:$GROUP_ARG}} [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it${USER_ARG:+ (and no UserName in it)}, and $US test $1"
 }
@@ -1844,12 +1925,12 @@ launcher_of() { # <NAME>
   _lo=$(launcher_path "$1")
   # a launcher from before 2026-10-22, named with a dot, still runs its job
   [ -e "$_lo" ] || [ ! -e "$HELPER_DIR/my-fda.$1" ] || _lo="$HELPER_DIR/my-fda.$1"
-  [ -e "$_lo" ] || err 00097 "no launcher '$1' ($_lo) -- $US status lists them"
+  [ -e "$_lo" ] || err 00105 "no launcher '$1' ($_lo) -- $US status lists them"
   printf '%s\n' "$_lo"
 }
 
 cmd_status() { # [NAME]
-  [ $# -le 1 ] || err 00098 "usage: $US status [<NAME>]"
+  [ $# -le 1 ] || err 00106 "usage: $US status [<NAME>]"
   if [ $# -eq 1 ]; then
     launcher_of "$1" > "$WORK/launchers" || exit 1
   else
@@ -1894,21 +1975,21 @@ cmd_status() { # [NAME]
 }
 
 cmd_test() { # <NAME>
-  [ $# -eq 1 ] || err 00099 "usage: $US test <NAME>"
+  [ $# -eq 1 ] || err 00107 "usage: $US test <NAME>"
   _l=$(launcher_of "$1") || exit 1
   daemons_to "$WORK/daemons"
   awk -F '\t' -v l="$_l" '$1 == l' "$WORK/daemons" > "$WORK/users"
   _k=$(wc -l < "$WORK/users" | tr -d ' ')
-  [ "$_k" != "0" ] || err 00100 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
-  [ "$_k" = "1" ] || err 00101 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
+  [ "$_k" != "0" ] || err 00108 "no LaunchDaemon in $LAUNCHD_DIR runs $_l -- set its Program to that path first"
+  [ "$_k" = "1" ] || err 00109 "$_k LaunchDaemons run $_l: $(cut -f 2 "$WORK/users" | tr '\n' ' ')-- start the one you mean: launchctl kickstart system/<label>"
   _lb=$(cut -f 2 "$WORK/users"); _pl=$(cut -f 3 "$WORK/users")
   _as=$(user_of "$_l")
   if [ -n "$_as" ] && _un=$("$c_plutil" -extract UserName raw -o - "$_pl" 2>/dev/null); then
-    err 00102 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
+    err 00110 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
   fi
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
   if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
-    err 00103 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
+    err 00111 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
     || _log=$("$c_plutil" -extract StandardOutPath raw -o - "$_pl" 2>/dev/null) \
@@ -1920,7 +2001,7 @@ cmd_test() { # <NAME>
 
 cmd_destroy() { # [go] <NAME>
   _go=0; [ "${1:-}" = "go" ] && { _go=1; shift; }
-  [ $# -eq 1 ] || err 00104 "usage: $US destroy [go] <NAME>"
+  [ $# -eq 1 ] || err 00112 "usage: $US destroy [go] <NAME>"
   _l=$(launcher_of "$1") || exit 1
   PHASE="reading the grants -- nothing was changed"
   grants_to "$WORK/all"
@@ -1937,7 +2018,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00105 "cannot delete '$_l'"
+  run rm -f "$_l" || err 00113 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
@@ -1980,6 +2061,7 @@ _my-fda() {
     '(-Q --quiet)'{-Q,--quiet}'[nothing but errors]' \\
     '--config[use this config]:config file:_files' \\
     '--create-config[print the default config, or write it to a file]' \\
+    '--install[record what this machine lets my-fda do]' \\
     '--run-tests[run the built-in tests]' \\
     '--stamp-version[record the commit in this file]' \\
     '--version[version, git describe, build id]' \\
@@ -2073,7 +2155,7 @@ t_world() {
   eval "$(default_config | grep '^GENERAL_TOOLS=')"   # the shipped list, from its one owner
   c_sqlite3=/usr/bin/sqlite3; c_md5=/sbin/md5; c_plutil=/usr/bin/plutil
   c_cc=/usr/bin/cc; c_xcode_select=/usr/bin/xcode-select; c_codesign=/usr/bin/codesign; c_csreq=/usr/bin/csreq
-  c_dscl=/usr/bin/dscl; GROUP_ARG=""
+  c_dscl=/usr/bin/dscl; GROUP_ARG=""; c_git=$(command -v git)
   c_killall=/usr/bin/true
   # the stubs of this run (t_stubs): they write into the test's own directory
   export T_DIR
@@ -2380,19 +2462,21 @@ t_gone_app_stays_where_nothing_can_take_it() {
   then t_pass; else t_fail "rc $_rc count $(t_count), '$_o'"; fi
 }
 t_list_says_what_remove_does_for_a_gone_app() {
-  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME -- root writes a read-only file"; t_pass; return; }
   # list's '-> remove' is what `list | grep -- '-> remove' | cut -f 1 | remove go`
-  # acts on; where remove can only say "these stay", list said '-> remove' all the
-  # same, and a check counting those never passed (on two machines, 2026-10-28)
+  # acts on; where remove can only say "these stay", a check counting those never
+  # passed (two machines, 2026-10-28). list takes it from TCC_DB_WRITABLE, which
+  # --install records -- it never writes TCC.db to find out: a writable TCC.db
+  # with "no" still says stays -- the proof that it does not test-write.
   t_grant 0 com.vanished.app
-  _w=$(QUIET=1 cmd_list | awk -F '\t' '/com.vanished.app/ { print $NF }')
-  chmod 444 "$TCC_DB"
-  _r=$(QUIET=1 cmd_list | awk -F '\t' '/com.vanished.app/ { print $NF }')
-  chmod 644 "$TCC_DB"
-  case "$_w|$_r" in
-    *"GONE -> remove"*"|"*"GONE: stays"*) case "$_r" in *"-> remove"*) t_fail "read-only: '$_r'" ;; *) t_pass ;; esac ;;
-    *) t_fail "writable '$_w', read-only '$_r'" ;;
-  esac
+  # shellcheck disable=SC2030,SC2031  # each subshell sets its own value
+  _n=$( (TCC_DB_WRITABLE=no; QUIET=1; cmd_list) | awk -F '\t' '/com.vanished.app/ { print $NF }')
+  # shellcheck disable=SC2030,SC2031  # each subshell sets its own value
+  _y=$( (TCC_DB_WRITABLE=yes; QUIET=1; cmd_list) | awk -F '\t' '/com.vanished.app/ { print $NF }')
+  # shellcheck disable=SC2030,SC2031  # each subshell sets its own value
+  _u=$( (TCC_DB_WRITABLE=""; QUIET=1; cmd_list) | awk -F '\t' '/com.vanished.app/ { print $NF }')
+  case "$_n" in *"GONE: stays"*) ;; *) t_fail "no: '$_n'"; return ;; esac
+  case "$_y" in *"GONE: stays"*|*"("*) t_fail "yes: '$_y'"; return ;; *"GONE -> remove"*) ;; *) t_fail "yes: '$_y'"; return ;; esac
+  case "$_u" in *"GONE -> remove ("*"--install"*) t_pass ;; *) t_fail "unknown: '$_u'" ;; esac
 }
 t_extension_grant_is_listed_and_not_taken_away() {
   t_grant 0 com.example.es 2 "$SERVICE_ES"; t_grant 1 "$T_DIR/bin/tool"
@@ -3344,6 +3428,72 @@ t_site_conf_gives_the_bases_the_search_and_the_offer() {
   chmod 600 "$T_DIR/site.conf"
   case "$_rc|$_o" in 1"|ERROR "*"cannot read '$T_DIR/site.conf'"*) t_pass ;; *) t_fail "unreadable: rc $_rc '$_o'" ;; esac
 }
+# Found through the site's search directory (a farm), the config is read from
+# the trees: the global one, then the local one -- local wins key by key, and
+# the global keys the local file does not set stay. The same whether the farm
+# still links the global file or, once the local one exists, the local one.
+t_config_reads_global_then_local() {
+  mkdir -p -- "$T_DIR/farm" "$T_DIR/global" "$T_DIR/local"
+  printf '%s\n' "CONFIG_SEARCH_DIR=\"$T_DIR/farm\"" "CONFIG_OFFER_DIR=\"$T_DIR/global\"" "CONFIG_LOCAL_DIR=\"$T_DIR/local\"" > "$T_DIR/site.conf"
+  printf '%s\n' 'TCC_DB=/global' 'HELPER_DIR=/global-helpers' > "$T_DIR/global/my-fda.conf"
+  printf '%s\n' 'TCC_DB=/local' 'TCC_DB_WRITABLE=no' > "$T_DIR/local/my-fda.conf"
+  for _to in global local; do
+    rm -f "$T_DIR/farm/my-fda.conf"; ln -s "../$_to/my-fda.conf" "$T_DIR/farm/my-fda.conf"
+    _o=$( (for _k in $CONFIG_KEYS; do unset "$_k"; done; CONFIG_ARG=""; MY_FDA_CONFIG=""
+    # shellcheck disable=SC2031  # load_config sets it in this subshell
+           load_config && printf '%s|%s|%s|%s' "$TCC_DB" "$HELPER_DIR" "$TCC_DB_WRITABLE" "$CONFIG_FILE") 2>&1)
+    [ "$_o" = "/local|/global-helpers|no|$T_DIR/global/my-fda.conf + $T_DIR/local/my-fda.conf" ] || { t_fail "farm -> $_to: '$_o'"; return; }
+  done
+  # --config names one file: that one alone
+  _o=$( (for _k in $CONFIG_KEYS; do unset "$_k"; done; CONFIG_ARG="$T_DIR/global/my-fda.conf"; MY_FDA_CONFIG=""
+    # shellcheck disable=SC2031  # load_config sets it in this subshell
+         load_config && printf '%s|%s' "$TCC_DB" "$TCC_DB_WRITABLE") 2>&1)
+  [ "$_o" = "/global|" ] || { t_fail "--config: '$_o'"; return; }
+  printf 'TCC_DB_WRITABLE=maybe\n' >> "$T_DIR/local/my-fda.conf"
+  _o=$( (for _k in $CONFIG_KEYS; do unset "$_k"; done; CONFIG_ARG=""; MY_FDA_CONFIG=""; load_config) 2>&1); _rc=$?
+  case "$_rc|$_o" in 1"|ERROR "*"TCC_DB_WRITABLE='maybe'"*) t_pass ;; *) t_fail "a bad value: rc $_rc '$_o'" ;; esac
+}
+# --install: the write test, its answer recorded as TCC_DB_WRITABLE in the
+# site's local config directory and committed there; the second run changes
+# nothing and says so; a changed answer replaces the line, never adds one.
+t_install_records_whether_tcc_db_can_be_written() {
+  mkdir -p -- "$T_DIR/local"
+  git -C "$T_DIR/local" init -q && git -C "$T_DIR/local" config user.name t && git -C "$T_DIR/local" config user.email t@t
+  printf '%s\n' '# a local config' 'TCC_DB_WRITABLE=no' > "$T_DIR/local/my-fda.conf"
+  git -C "$T_DIR/local" add my-fda.conf && git -C "$T_DIR/local" commit -q -m init
+  _o=$( (CONFIG_LOCAL_DIR="$T_DIR/local"; cmd_install) 2>&1); _rc=$?
+  [ "$_rc" = "0" ] || { t_fail "rc $_rc '$_o'"; return; }
+  case "$_o" in *"TCC.db write test: allowed -> TCC_DB_WRITABLE=yes recorded in $T_DIR/local/my-fda.conf (was no), committed"*) ;; *) t_fail "first: '$_o'"; return ;; esac
+  if ! { [ "$(grep -c '^TCC_DB_WRITABLE=' "$T_DIR/local/my-fda.conf")" = "1" ] && grep -qx 'TCC_DB_WRITABLE=yes' "$T_DIR/local/my-fda.conf" && grep -qx '# a local config' "$T_DIR/local/my-fda.conf"; }; then
+    t_fail "file: $(cat "$T_DIR/local/my-fda.conf")"; return
+  fi
+  [ -z "$(git -C "$T_DIR/local" status --porcelain)" ] || { t_fail "left uncommitted: $(git -C "$T_DIR/local" status --porcelain)"; return; }
+  _c=$(git -C "$T_DIR/local" rev-list --count HEAD)
+  _o=$( (CONFIG_LOCAL_DIR="$T_DIR/local"; cmd_install) 2>&1)
+  case "$_o" in *"TCC_DB_WRITABLE=yes already recorded in $T_DIR/local/my-fda.conf"*) ;; *) t_fail "second: '$_o'"; return ;; esac
+  [ "$(git -C "$T_DIR/local" rev-list --count HEAD)" = "$_c" ] || { t_fail "second run committed"; return; }
+  [ "$(id -u)" = "0" ] && { echo "  SKIP  $T_NAME (read-only half) -- root writes a read-only file"; t_pass; return; }
+  chmod 444 "$TCC_DB"
+  _o=$( (CONFIG_LOCAL_DIR="$T_DIR/local"; cmd_install) 2>&1)
+  chmod 644 "$TCC_DB"
+  case "$_o" in *"TCC.db write test: refused ("*") -> TCC_DB_WRITABLE=no recorded in $T_DIR/local/my-fda.conf (was yes), committed"*) ;; *) t_fail "refused: '$_o'"; return ;; esac
+  if [ "$(grep -c '^TCC_DB_WRITABLE=' "$T_DIR/local/my-fda.conf")" = "1" ] && grep -qx 'TCC_DB_WRITABLE=no' "$T_DIR/local/my-fda.conf"; then t_pass; else t_fail "file: $(cat "$T_DIR/local/my-fda.conf")"; fi
+}
+# --install with no local config file yet: it creates it, with a comment that
+# says what wrote the line; with no CONFIG_LOCAL_DIR it records in the config
+# it read.
+t_install_creates_the_local_config_or_uses_the_one_read() {
+  mkdir -p -- "$T_DIR/local"
+  _o=$( (CONFIG_LOCAL_DIR="$T_DIR/local"; cmd_install) 2>&1)
+  case "$_o" in *"TCC_DB_WRITABLE=yes recorded in $T_DIR/local/my-fda.conf (created)"*) ;; *) t_fail "created: '$_o'"; return ;; esac
+  if ! { grep -q '^# .*my-fda --install' "$T_DIR/local/my-fda.conf" && grep -qx 'TCC_DB_WRITABLE=yes' "$T_DIR/local/my-fda.conf"; }; then
+    t_fail "file: $(cat "$T_DIR/local/my-fda.conf")"; return
+  fi
+  printf 'TCC_DB=/x\n' > "$T_DIR/one.conf"
+  _o=$( (CONFIG_LOCAL_DIR=""; CONFIG_FILE="$T_DIR/one.conf"; cmd_install) 2>&1)
+  case "$_o" in *"recorded in $T_DIR/one.conf"*) ;; *) t_fail "no local dir: '$_o'"; return ;; esac
+  if grep -qx 'TCC_DB=/x' "$T_DIR/one.conf" && grep -qx 'TCC_DB_WRITABLE=yes' "$T_DIR/one.conf"; then t_pass; else t_fail "file: $(cat "$T_DIR/one.conf")"; fi
+}
 t_create_config_never_overwrites() {
   : > "$T_DIR/exists.conf"
   _o=$("$(self_path)" --create-config "$T_DIR/exists.conf" 2>&1); _rc=$?
@@ -3351,6 +3501,8 @@ t_create_config_never_overwrites() {
 }
 t_dashed_verb_and_rm_name_the_verb() {
   _a=$("$(self_path)" --list 2>&1); _b=$("$(self_path)" rm abcdef 2>&1)
+  _i=$("$(self_path)" install 2>&1); _g=$("$(self_path)" --install list 2>&1)
+  case "$_i|$_g" in *"you mean"*"my-fda --install"*"|"*"--install goes alone"*) ;; *) t_fail "install: '$_i' / '$_g'"; return ;; esac
   case "$_a|$_b" in *"you mean"*"my-fda list"*"|"*"you mean"*"my-fda remove"*) t_pass ;; *) t_fail "got '$_a' / '$_b'" ;; esac
 }
 t_help_names_every_verb() {
@@ -3451,7 +3603,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_test_refuses_unused_and_ambiguous t_destroy_shows_then_go_deletes_launcher_and_grant \
                 t_list_refuses_without_root t_old_config_takes_new_keys_from_the_defaults \
                 t_config_setting_a_key_empty_names_it \
-                t_default_config_has_every_key t_config_offer_names_only_searched_paths t_site_conf_gives_the_bases_the_search_and_the_offer \
+                t_default_config_has_every_key t_config_offer_names_only_searched_paths t_site_conf_gives_the_bases_the_search_and_the_offer t_config_reads_global_then_local t_install_records_whether_tcc_db_can_be_written t_install_creates_the_local_config_or_uses_the_one_read \
                 t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
                 t_help_names_every_verb t_completion_installs_once_and_names_every_verb t_err_codes_unique_in_order_without_gaps"
   # Each test builds its own world, so the selected tests are dealt
@@ -3516,26 +3668,27 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00106 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00114 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
-    --user)           [ "$_n" -ge 1 ] || err 00107 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --user)           [ "$_n" -ge 1 ] || err 00115 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --user=*)         USER_ARG="${_a#--user=}" ;;
-    --group)          [ "$_n" -ge 1 ] || err 00108 "--group needs a group name"; GROUP_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --group)          [ "$_n" -ge 1 ] || err 00116 "--group needs a group name"; GROUP_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --group=*)        GROUP_ARG="${_a#--group=}" ;;
     --recommended)    RECOMMENDED=1 ;;
     --catch)          CATCH=1 ;;
-    --service)        [ "$_n" -ge 1 ] || err 00109 "--service needs a service: a part of its name (RemovableVolumes), or all"; SERVICE_SEL="$1"; shift; _n=$((_n - 1)) ;;
+    --service)        [ "$_n" -ge 1 ] || err 00117 "--service needs a service: a part of its name (RemovableVolumes), or all"; SERVICE_SEL="$1"; shift; _n=$((_n - 1)) ;;
     --service=*)      SERVICE_SEL="${_a#--service=}" ;;
-    --since)          [ "$_n" -ge 1 ] || err 00110 "--since needs a local time, YYYY-MM-DD HH:MM:SS"; SINCE_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --since)          [ "$_n" -ge 1 ] || err 00118 "--since needs a local time, YYYY-MM-DD HH:MM:SS"; SINCE_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --since=*)        SINCE_ARG="${_a#--since=}" ;;
-    --until)          [ "$_n" -ge 1 ] || err 00111 "--until needs a local time, YYYY-MM-DD HH:MM:SS"; UNTIL_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --until)          [ "$_n" -ge 1 ] || err 00119 "--until needs a local time, YYYY-MM-DD HH:MM:SS"; UNTIL_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --until=*)        UNTIL_ARG="${_a#--until=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
     --run-tests)      run_tests "${1:-}"; exit $? ;;
+    --install)        INSTALL=1 ;;
     --list|--denied|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00112 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00113 "unknown option '$_a' (--help)" ;;
+                      err 00120 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00121 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -3544,25 +3697,28 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|denied|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00114 "no such command; you mean \`$US remove\`" ;;
-  "")  usage 1>&2; exit 1 ;;
-  *)   err 00115 "unknown command '$CMD' (--help)" ;;
+  rm)  err 00122 "no such command; you mean \`$US remove\`" ;;
+  install) err 00123 "no such command; you mean \`$US --install\`" ;;
+  "")  [ "$INSTALL" = "1" ] || { usage 1>&2; exit 1; } ;;
+  *)   err 00124 "unknown command '$CMD' (--help)" ;;
 esac
-[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00116 "--user goes with create -- the user a new launcher runs its target as"
-[ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00117 "--group goes with create -- with --user, the primary group a new launcher takes"
-[ "$CATCH" = "0" ] || [ "$CMD" = denied ] || err 00118 "--catch goes with denied -- it waits for the next refused check"
-[ -z "$SERVICE_SEL" ] || [ "$CMD" = denied ] || err 00119 "--service goes with denied -- the TCC services whose refusals it reports"
-[ -z "$SINCE_ARG" ] || [ "$CMD" = denied ] || err 00120 "--since goes with denied -- the local time its window starts at"
-[ -z "$UNTIL_ARG" ] || [ "$CMD" = denied ] || err 00121 "--until goes with denied -- with --since, the local time its window ends at"
-[ "$RECOMMENDED" = "0" ] || [ "$CMD" = remove ] || err 00122 "--recommended goes with remove -- the grants '$US list' marks '$TO_REMOVE'"
+[ "$INSTALL" = "0" ] || [ -z "$CMD" ] || err 00125 "--install goes alone -- it records what this machine lets my-fda do"
+[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00126 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00127 "--group goes with create -- with --user, the primary group a new launcher takes"
+[ "$CATCH" = "0" ] || [ "$CMD" = denied ] || err 00128 "--catch goes with denied -- it waits for the next refused check"
+[ -z "$SERVICE_SEL" ] || [ "$CMD" = denied ] || err 00129 "--service goes with denied -- the TCC services whose refusals it reports"
+[ -z "$SINCE_ARG" ] || [ "$CMD" = denied ] || err 00130 "--since goes with denied -- the local time its window starts at"
+[ -z "$UNTIL_ARG" ] || [ "$CMD" = denied ] || err 00131 "--until goes with denied -- with --since, the local time its window ends at"
+[ "$RECOMMENDED" = "0" ] || [ "$CMD" = remove ] || err 00132 "--recommended goes with remove -- the grants '$US list' marks '$TO_REMOVE'"
 
 need_root
 load_config
 install_zsh_completion
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00123 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00133 "mktemp failed"
 interrupt_traps
 
 case "$CMD" in
+  "")      cmd_install ;;
   list)    cmd_list "$@" ;;
   denied)  cmd_denied "$@" ;;
   add)     cmd_add "$@" ;;

@@ -192,7 +192,9 @@ selection goes through the pipe `list` is made for:
   the pane does (a path's file name, an app's `.app` name) to take away
   with "-". A GONE app neither tccutil nor sqlite can take stays, said
   once: the pane does not show it either, and it applies to nothing --
-  `list` says so too (`GONE: stays`, not `-> remove`). Then
+  `list` says so too (`GONE: stays`, not `-> remove`), from
+  `TCC_DB_WRITABLE`, which `my-fda --install` records -- `list` never writes
+  TCC.db to find out (without it: `GONE -> remove (whether it can: ...)`). Then
   the grants are read again, and anything else still there is an error.
   Even root with Full Disk Access may be refused a write (macOS
   26); the probe for it must really write, since sqlite opens such a
@@ -227,12 +229,28 @@ arrives. `my-fda --create-config` prints the defaults. Search order: `$MY_FDA_CO
 `$CONFIG_SEARCH_DIR/my-fda.conf`, `$CONFIG_SEARCH_DIR/my-fda`, `~/.my-fda.conf`,
 `/etc/my-fda.conf`, `/usr/local/etc/my-fda.conf`.
 
+**Global, then this machine's.** A config found in `CONFIG_SEARCH_DIR` (a
+farm of links into the trees) is read from the trees instead: the site's
+`$CONFIG_OFFER_DIR/my-fda.conf`, then `$CONFIG_LOCAL_DIR/my-fda.conf`, this
+machine's own, which wins key by key -- whichever of the two the farm links.
+`--config` and `$MY_FDA_CONFIG` name one file, read alone.
+
+**`my-fda --install`** (root) records what this machine lets my-fda do,
+found out once instead of on every run: today `TCC_DB_WRITABLE`, by a real
+write test (macOS refuses it once, there, not on every `list`). The line
+goes into `$CONFIG_LOCAL_DIR/my-fda.conf` (created when missing; without
+`CONFIG_LOCAL_DIR`, the config it read) and is committed where that is a
+git tree. A second run changes nothing and says so; run it again after a
+macOS update or a change of grant.
+
 **A site file, read first.** `/LINKS/default/site.conf`, when it exists, is
 read before the config -- the one site path in my-fda. Plain `KEY="value"`
 lines, for every tool of a site: `DATA_BASE_DIR` (`BACKUP_DIR`'s default is
 `$DATA_BASE_DIR/<user>/my-fda`), `LOG_BASE_DIR`, `CONFIG_SEARCH_DIR` (searched
 as above), `CONFIG_OFFER_DIR` and `CONFIG_OFFER_NOTE` (where "no config found"
-offers to write one, and the note beside it). Without the file: `/var/db`
+offers to write one, and the note beside it), `CONFIG_LOCAL_DIR` (this
+machine's config directory: read after the global one, written by
+`--install`). Without the file: `/var/db`
 and `/var/log`, no search directory, no site offer -- my-fda works with no
 setup. There but unreadable: an error, never the fallback, which would keep
 this user's state apart from everyone else's. Environment variables are never
