@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="85618c7"
-SCRIPT_RELEASE="v0.2-16-g85618c7"
+SCRIPT_COMMIT="d451eee"
+SCRIPT_RELEASE="v0.2-17-gd451eee"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -2702,6 +2702,23 @@ t_denied_a_subject_without_its_request_says_so() {
   case "$_o" in *"Privacy & Security > "[!A-Z]*|*"Privacy & Security > "|*"Privacy & Security >") t_fail "an empty pane pointer: '$_o'"; return ;; esac
   case "$_o" in *"mediaanalysisd"*"other[1] reason[5]"*"tccd's request is not in the log (tccd[192:311.78]): service unknown, nothing to act on"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
 }
+# An Apple app's widget with its subject and attribution but no request or
+# context lines (macado, 2026-11-12 17:49:40, com.apple.iCal via
+# CalendarWidgetExtension): service unknown, so nothing to act on either --
+# not listed by default nor under -Q, counted, shown with -V.
+t_denied_an_attributed_answer_without_its_request_is_not_listed() {
+  _p="2026-10-25 10:01:29.08"
+  printf '%s\n' "${_p}0 Df tccd[1645:41246] [com.apple.TCC:access] AUTHREQ_ATTRIBUTION: msgID=41246.7236, attribution={accessing={TCCDProcess: identifier=com.apple.iCal.CalendarWidgetExtension, pid=777, auid=501, euid=501, binary_path=/System/Applications/Calendar.app/Contents/PlugIns/CalendarWidgetExtension.appex/Contents/MacOS/CalendarWidgetExtension}, }," \
+    "${_p}1 Df tccd[1645:41246] [com.apple.TCC:access] AUTHREQ_SUBJECT: msgID=41246.7236, subject=com.apple.iCal," \
+    "${_p}3 Df tccd[1645:41246] [com.apple.TCC:access] AUTHREQ_RESULT: msgID=41246.7236, authValue=0, authReason=12, authVersion=1, desired_auth=0, error=(null)," > "$T_DIR/tccd.log"
+  _o=$( (QUIET=1; cmd_denied) 2>&1)
+  [ -z "$_o" ] || { t_fail "-Q: '$_o'"; return; }
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"com.apple.iCal"*) t_fail "listed without -V: '$_o'"; return ;; esac
+  case "$_o" in *"nothing refused"*"; 1 answer(s) whose request is not in the log (-V)"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$( (VRB=1; cmd_denied) 2>&1)
+  case "$_o" in *"com.apple.iCal"*"denied[0] reason[12]"*"CalendarWidgetExtension"*"tccd's request is not in the log (tccd[1645:41246.7236]): service unknown, nothing to act on"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
+}
 # MADE UP, in the real line format: no refused volume answer has been seen
 # (a whole day of a LaunchDaemon's had none). One refused by uid 1001's tccd, one
 # Full Disk Access refusal, one check outside the file protections.
@@ -3414,7 +3431,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_denied_passes_the_window_and_refuses_a_bad_one t_denied_tells_an_ssh_login_from_a_job_with_no_parent \
     t_denied_catch_shows_the_refused_process_and_its_parents t_denied_catch_takes_no_window_and_goes_with_denied_only \
     t_list_points_a_refused_tool_at_its_job_not_at_remove \
-    t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process t_denied_an_answer_without_its_request_says_so t_denied_a_subject_without_its_request_says_so \
+    t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process t_denied_an_answer_without_its_request_says_so t_denied_a_subject_without_its_request_says_so t_denied_an_attributed_answer_without_its_request_is_not_listed \
     t_denied_selects_the_services t_denied_takes_a_program_by_name_or_path t_denied_reports_without_the_grants \
     t_denied_reports_a_refusal_tccd_never_answered t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second \
     t_denied_service_part_leaves_out_an_unknown_service t_denied_since_reads_from_a_local_time t_denied_until_ends_a_since_window \
