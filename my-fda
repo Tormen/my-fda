@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="9bb41ad"
-SCRIPT_RELEASE="v0.2-13-g9bb41ad"
+SCRIPT_COMMIT="afa3523"
+SCRIPT_RELEASE="v0.2-14-gafa3523"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -1354,6 +1354,9 @@ refusals() { # [catch] [PROGRAM]
       VV[n] = (v[k] == "" ? "-" : v[k]); RR[n] = (rp[k] == "" ? "-" : rp[k])
       PD[n] = (pd[k] == "" ? "-" : pd[k]); UU[n] = (uu[k] == "" ? "-" : uu[k])
       SV[n] = s[k]; TU[n] = tname(u[k]); IDN[n] = (idn[k] == "" ? "-" : idn[k])
+      # an answer whose request lines are not in the log: its tccd and msgID
+      # are all that is known of it, the handle to look it up by
+      if (s[k] == "" && c[k] == "") OP[n] = "tccd[" k "]"
       delete u[k]; delete s[k]; delete c[k]; delete v[k]; delete pd[k]; delete uu[k]; delete rp[k]; delete idn[k]
       S = SN[n]
       if (S in pend) {                 # the answer held for this caller: a probe, or refused
@@ -1421,6 +1424,10 @@ render_refusals() { # <grants FILE>
           note = q[1] " " q[2] " -> " (q[3] == "none seen" \
             ? "no tccd answer in the log: catch the next one (" us " denied --catch)" \
             : "tccd could not answer; a launcher with Full Disk Access is answered by the system tccd itself (" us " create)")
+        }
+        else if (sv[k] == "" && c == "?") {  # tccd answered, and its request is not in the log
+          split(pn[k], q, SUBSEP)
+          note = "only tccd'"'"'s answer is in the log (" q[1] "), not its request: program and service unknown, nothing to act on"
         }
         else if (rs[k] ~ /\/sshd-keygen-wrapper$/)
           note = "run in an ssh login -> System Settings > General > Sharing > Remote Login (i): Allow full disk access for remote users -- or run it through a launcher"
@@ -2660,6 +2667,17 @@ t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process() {
   case "$_o" in *"SystemPolicyAllFiles  "*"denied[0] reason[5]"*"tccd system[0]"*) ;; *) t_fail "narrower refused, Full Disk Access: '$_o'"; return ;; esac
   case "$_o" in *"SystemPolicyRemovableVolumes  denied[0] reason[2]  tccd tester[1001]"*) t_pass ;; *) t_fail "narrower refused: '$_o'" ;; esac
 }
+# tccd's answer with no request lines for it (macado, 2026-11-12 14:13:29):
+# a refusal, but of nothing it can name -- no empty pane pointer, the tccd
+# and msgID instead. Beside it, a whole check, still read as before.
+t_denied_an_answer_without_its_request_says_so() {
+  { printf '%s\n' "2026-10-25 10:01:29.083 Df tccd[192:428a401] [com.apple.TCC:access] AUTHREQ_RESULT: msgID=311.77, authValue=0, authReason=12, authVersion=1, desired_auth=0, error=(null),"
+    t_check 191 186.1 "$SERVICE" /bin/sh /usr/sbin/diskutil 0 10:01:30; } > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"Privacy & Security > "[!A-Z]*|*"Privacy & Security >") t_fail "an empty pane pointer: '$_o'"; return ;; esac
+  case "$_o" in *"denied[0] reason[12]"*"only tccd's answer is in the log (tccd[192:311.77]), not its request: program and service unknown"*) ;; *) t_fail "the answer alone: '$_o'"; return ;; esac
+  case "$_o" in *"via diskutil  from sh  a shell"*) t_pass ;; *) t_fail "the whole check: '$_o'" ;; esac
+}
 # MADE UP, in the real line format: no refused volume answer has been seen
 # (a whole day of a LaunchDaemon's had none). One refused by uid 1001's tccd, one
 # Full Disk Access refusal, one check outside the file protections.
@@ -3372,7 +3390,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_denied_passes_the_window_and_refuses_a_bad_one t_denied_tells_an_ssh_login_from_a_job_with_no_parent \
     t_denied_catch_shows_the_refused_process_and_its_parents t_denied_catch_takes_no_window_and_goes_with_denied_only \
     t_list_points_a_refused_tool_at_its_job_not_at_remove \
-    t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process \
+    t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process t_denied_an_answer_without_its_request_says_so \
     t_denied_selects_the_services t_denied_takes_a_program_by_name_or_path t_denied_reports_without_the_grants \
     t_denied_reports_a_refusal_tccd_never_answered t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second \
     t_denied_service_part_leaves_out_an_unknown_service t_denied_since_reads_from_a_local_time t_denied_until_ends_a_since_window \
