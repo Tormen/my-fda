@@ -205,8 +205,20 @@ the permission database is protected. `my-fda --help` is the reference.
 Plain shell, sourced at startup over the defaults: a key the file does not
 set keeps its default, so an older config needs no edit when a new key
 arrives. `my-fda --create-config` prints the defaults. Search order: `$MY_FDA_CONFIG`, `--config <FILE>`,
-`/LINKS/default/my-fda.conf`, `/LINKS/default/my-fda`, `~/.my-fda.conf`,
+`$CONFIG_SEARCH_DIR/my-fda.conf`, `$CONFIG_SEARCH_DIR/my-fda`, `~/.my-fda.conf`,
 `/etc/my-fda.conf`, `/usr/local/etc/my-fda.conf`.
+
+**A site file, read first.** `/LINKS/default/site.conf`, when it exists, is
+read before the config -- the one site path in my-fda. Plain `KEY="value"`
+lines, for every tool of a site: `DATA_BASE_DIR` (`BACKUP_DIR`'s default is
+`$DATA_BASE_DIR/<user>/my-fda`), `LOG_BASE_DIR`, `CONFIG_SEARCH_DIR` (searched
+as above), `CONFIG_OFFER_DIR` and `CONFIG_OFFER_NOTE` (where "no config found"
+offers to write one, and the note beside it). Without the file: `/var/db`
+and `/var/log`, no search directory, no site offer -- my-fda works with no
+setup. There but unreadable: an error, never the fallback, which would keep
+this user's state apart from everyone else's. Environment variables are never
+read for these: a LaunchDaemon, `sudo` and a login shell would each see
+different ones.
 
 ## Shell completion
 
