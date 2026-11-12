@@ -239,9 +239,10 @@ machine's own, which wins key by key -- whichever of the two the farm links.
 found out once instead of on every run: today `TCC_DB_WRITABLE`, by a real
 write test (macOS refuses it once, there, not on every `list`). The line
 goes into `$CONFIG_LOCAL_DIR/my-fda.conf` (created when missing; without
-`CONFIG_LOCAL_DIR`, the config it read) and is committed where that is a
-git tree. A second run changes nothing and says so; run it again after a
-macOS update or a change of grant.
+`CONFIG_LOCAL_DIR`, the config it read -- refused where the site has a
+`CONFIG_SEARCH_DIR`, whose configs every machine shares) and is committed
+where that is a git tree. A second run changes nothing and says so; run it
+again after a macOS update or a change of grant.
 
 **A site file, read first.** `/LINKS/default/site.conf`, when it exists, is
 read before the config -- the one site path in my-fda. Plain `KEY="value"`
