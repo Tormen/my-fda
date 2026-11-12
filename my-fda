@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="7ce8266"
-SCRIPT_RELEASE="v0.2-15-g7ce8266"
+SCRIPT_COMMIT="85618c7"
+SCRIPT_RELEASE="v0.2-16-g85618c7"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -203,6 +203,8 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 from: the program tccd was asked about. A kernel refusal
                 with no tccd or sandboxd failure is another macOS
                 protection, not a privacy refusal: counted, -V shows it.
+                An answer whose request (the service) is not in the log
+                is nothing to act on: counted, -V shows it.
                 An app (a bundle id) is pointed at the pane, a program at
                 a launcher. DENIED_IGNORE names programs to leave out
                 (counted, -V shows them; -Q leaves them out too).
@@ -1398,7 +1400,7 @@ render_refusals() { # <grants FILE>
     function short(x) { sub(/^kTCCService/, "", x); return x }
     FILENAME == ARGV[1] { g[$3] = $4; gd[$3] = $6; next }
     FILENAME == ARGV[2] { fl[$1] = $2; next }
-    ($12 == "probe" || $12 == "unpaired" || $17 == "1") && vrb != "1" { next }
+    ($12 == "probe" || $12 == "unpaired" || ($12 == "refused" && $8 == "") || $17 == "1") && vrb != "1" { next }
     { k = $2 SUBSEP $3 SUBSEP $5 SUBSEP $8 SUBSEP $9 SUBSEP $10 SUBSEP $12 SUBSEP $13 SUBSEP $14 SUBSEP $17
       if (!(k in n)) { o[++rows] = k; first[k] = $1; last[k] = $1; cl[k] = $2; av[k] = $3; rs[k] = $5
                        sv[k] = $8; ar[k] = $9; tu[k] = $10; kind[k] = $12; pn[k] = $13 SUBSEP $14 SUBSEP $15 SUBSEP $16
@@ -1541,17 +1543,20 @@ cmd_denied() { # [PROGRAM] [LAST]
   refusals "" "$_progarg" < "$WORK/log" > "$WORK/checks"
   # listed: refused, and refused with no answer, unless DENIED_IGNORE names
   # the program; counted, and shown only with -V: probes, kernel refusals
-  # with no privacy check, ignored programs
-  awk -F '\t' '($12 == "refused" || $12 == "noanswer") && $17 != "1"' "$WORK/checks" > "$WORK/refused"
+  # with no privacy check, ignored programs, answers whose request (the
+  # service) is not in the log -- none of these is anything to act on
+  awk -F '\t' '(($12 == "refused" && $8 != "") || $12 == "noanswer") && $17 != "1"' "$WORK/checks" > "$WORK/refused"
   _pb=$(awk -F '\t' '$12 == "probe" { n++ } END { print n+0 }' "$WORK/checks")
   _ot=$(awk -F '\t' '$12 == "unpaired" { n++ } END { print n+0 }' "$WORK/checks")
   _ig=$(awk -F '\t' '$17 == "1" { n++ } END { print n+0 }' "$WORK/checks")
+  _un=$(awk -F '\t' '$12 == "refused" && $8 == "" && $17 != "1" { n++ } END { print n+0 }' "$WORK/checks")
   _pr=""
   [ "$_pb" = "0" ] || _pr="; $_pb probe(s) a narrower grant then allowed"
   [ "$_ot" = "0" ] || _pr="$_pr; $_ot kernel refusal(s) with no privacy check"
   [ "$_ig" = "0" ] || _pr="$_pr; $_ig ignored (DENIED_IGNORE)"
+  [ "$_un" = "0" ] || _pr="$_pr; $_un answer(s) whose request is not in the log"
   [ -z "$_pr" ] || _pr="$_pr (-V)"
-  if [ ! -s "$WORK/refused" ] && { [ "$((_pb + _ot + _ig))" = "0" ] || [ "$VRB" != "1" ]; }; then
+  if [ ! -s "$WORK/refused" ] && { [ "$((_pb + _ot + _ig + _un))" = "0" ] || [ "$VRB" != "1" ]; }; then
     msg "nothing refused $_in ($_scope)$_pr [tccd checks read: $_r]"
     return 0
   fi
@@ -2668,26 +2673,34 @@ t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process() {
   case "$_o" in *"SystemPolicyRemovableVolumes  denied[0] reason[2]  tccd tester[1001]"*) t_pass ;; *) t_fail "narrower refused: '$_o'" ;; esac
 }
 # tccd's answer with no request lines for it (macado, 2026-11-12 14:13:29):
-# a refusal, but of nothing it can name -- no empty pane pointer, the tccd
-# and msgID instead. Beside it, a whole check, still read as before.
+# a refusal of nothing it can name, so nothing to act on -- left out like a
+# probe, counted, shown with -V: no empty pane pointer, the tccd and msgID
+# instead. -Q prints nothing for it. Beside it, a whole check, listed as before.
 t_denied_an_answer_without_its_request_says_so() {
   { printf '%s\n' "2026-10-25 10:01:29.083 Df tccd[192:428a401] [com.apple.TCC:access] AUTHREQ_RESULT: msgID=311.77, authValue=0, authReason=12, authVersion=1, desired_auth=0, error=(null),"
     t_check 191 186.1 "$SERVICE" /bin/sh /usr/sbin/diskutil 0 10:01:30; } > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
+  case "$_o" in *"reason[12]"*) t_fail "listed without -V: '$_o'"; return ;; esac
+  case "$_o" in *"via diskutil  from sh  a shell"*"1 refused check(s) from 1 program(s)"*"; 1 answer(s) whose request is not in the log (-V)"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$( (VRB=1; cmd_denied) 2>&1)
   case "$_o" in *"Privacy & Security > "[!A-Z]*|*"Privacy & Security > "|*"Privacy & Security >") t_fail "an empty pane pointer: '$_o'"; return ;; esac
-  case "$_o" in *"denied[0] reason[12]"*"tccd's request is not in the log (tccd[192:311.77]): program and service unknown, nothing to act on"*) ;; *) t_fail "the answer alone: '$_o'"; return ;; esac
-  case "$_o" in *"via diskutil  from sh  a shell"*) t_pass ;; *) t_fail "the whole check: '$_o'" ;; esac
+  case "$_o" in *"denied[0] reason[12]"*"tccd's request is not in the log (tccd[192:311.77]): program and service unknown, nothing to act on"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
 }
 # tccd's subject and answer with no request or context lines (macado,
 # 2026-11-12 17:19:12, mediaanalysisd): the program is known, the service
-# is not -- no pane pointer built from it, the tccd and msgID instead.
+# is not -- no pane pointer built from it, the tccd and msgID instead; alone,
+# "nothing refused", and -Q, which a daemon counts rows of, prints nothing.
 t_denied_a_subject_without_its_request_says_so() {
   _m=/System/Library/PrivateFrameworks/MediaAnalysis.framework/Versions/A/mediaanalysisd
   printf '%s\n' "2026-10-25 10:01:29.080 Df tccd[192:428a401] [com.apple.TCC:access] AUTHREQ_SUBJECT: msgID=311.78, subject=$_m," \
     "2026-10-25 10:01:29.083 Df tccd[192:428a401] [com.apple.TCC:access] AUTHREQ_RESULT: msgID=311.78, authValue=1, authReason=5, authVersion=1, desired_auth=0, error=(null)," > "$T_DIR/tccd.log"
+  _o=$( (QUIET=1; cmd_denied) 2>&1)
+  [ -z "$_o" ] || { t_fail "-Q: '$_o'"; return; }
   _o=$(cmd_denied 2>&1)
+  case "$_o" in *"nothing refused"*"; 1 answer(s) whose request is not in the log (-V)"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  _o=$( (VRB=1; cmd_denied) 2>&1)
   case "$_o" in *"Privacy & Security > "[!A-Z]*|*"Privacy & Security > "|*"Privacy & Security >") t_fail "an empty pane pointer: '$_o'"; return ;; esac
-  case "$_o" in *"mediaanalysisd"*"other[1] reason[5]"*"tccd's request is not in the log (tccd[192:311.78]): service unknown, nothing to act on"*) t_pass ;; *) t_fail "the subject alone: '$_o'" ;; esac
+  case "$_o" in *"mediaanalysisd"*"other[1] reason[5]"*"tccd's request is not in the log (tccd[192:311.78]): service unknown, nothing to act on"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
 }
 # MADE UP, in the real line format: no refused volume answer has been seen
 # (a whole day of a LaunchDaemon's had none). One refused by uid 1001's tccd, one

@@ -149,6 +149,11 @@ selection goes through the pipe `list` is made for:
   changes it. `denied` counts such lines in its summary and lists them only
   with `-V` (`other[kernel]`); `denied --catch` waits past them, and with
   `-V` stops at one too -- to look at what does it.
+- **An answer with no request.** tccd's answer whose request lines (the
+  service, often the program too) are not in the log refuses nothing you
+  can name: `denied` counts it in its summary and lists it only with `-V`,
+  by its tccd and msgID (`tccd[1645:41246.7230]`), the handle to find it
+  in the log.
 - **An app or a job.** A program refused a narrower protection is pointed at
   a launcher (`my-fda create`) when it is a path -- a job of yours; an app,
   named by its bundle id, at System Settings > Privacy & Security > Files and
