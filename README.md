@@ -73,7 +73,9 @@ grant.
 
 ## Commands
 
-    my-fda list                       every grant: an ID, the client, allowed/denied, what to do
+    my-fda list [--service <SERVICE>|all]
+                                      every grant: an ID, the client, allowed/denied, what to do;
+                                      --service: another TCC service's grants (AppBundles: App Management), with a service column
     my-fda denied [<PROGRAM>] [<LAST> | --since <TIME> [--until <TIME>]] [--service <SERVICE>|all]
                                       every file check macOS refused, from the system log (default: the last 1d)
     my-fda denied --catch [<PROGRAM>] [--service <SERVICE>|all]

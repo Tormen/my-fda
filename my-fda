@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="e1c7f01"
-SCRIPT_RELEASE="v0.2-22-ge1c7f01"
+SCRIPT_COMMIT="f7ce106"
+SCRIPT_RELEASE="v0.2-23-gf7ce106"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -157,7 +157,8 @@ usage: $US [-Q] [-V] [--config <FILE>] <COMMAND> [<ARGS>]
 Full Disk Access for root jobs, kept stable across Homebrew upgrades.
 
 GRANTS -- the "+" and "-" of System Settings > Full Disk Access
-  list          every grant, one line each: an ID, a TAB, the client (a path
+  list [--service <SERVICE>|all]
+                every grant, one line each: an ID, a TAB, the client (a path
                 or an app id), allowed[2] / denied[0] with the raw value, and
                 what to do with it:
                   GONE -> remove        the path or the app no longer exists
@@ -184,6 +185,12 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 An app id is GONE only when neither Spotlight nor
                 LaunchServices knows it (Spotlight misses helpers inside
                 other apps); Apple's own app ids are never called GONE.
+                --service: instead, the grants of the TCC services whose
+                name holds SERVICE, any case (AppBundles: App Management,
+                Accessibility), or of every service (all) -- a column after
+                the client names each row's service; the notes above are
+                Full Disk Access's. A step asks whether a program is ON by
+                its row's allowed[2].
   denied [<PROGRAM>] [<LAST> | --since <TIME> [--until <TIME>]] [--service <SERVICE>|all]
                 every file check macOS refused a program, from tccd's lines
                 in the system log of the last LAST (30m, 2h, 3d or boot;
@@ -586,6 +593,8 @@ classify() {
     case "$_sv" in
       "$SERVICE_ES") _n="system extension (Endpoint Security): in the pane, not removed by my-fda"; _idk="es$_t" ;;
       mdm)           _n="profile: not in System Settings -- it goes with the profile"; _idk="mdm" ;;
+      "$SERVICE")    ;;
+      *)             _idk="${_sv#kTCCService}$_t" ;;   # list --service: its own ID per service
     esac
     if [ "$_sv" != "$SERVICE" ]; then
       :
@@ -632,19 +641,25 @@ classify() {
     else
       _n="unknown client type [$_t]"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(grant_id "$_idk" "$_c")" "$_t" "$_c" "$_s" "$_n" "${_d:--}" "${_x:--}"
+    [ "$_sv" = "mdm" ] && _sv=$SERVICE
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(grant_id "$_idk" "$_c")" "$_t" "$_c" "$_s" "$_n" "${_d:--}" "${_x:--}" "$_sv"
   done
 }
 
 # Classified lines on stdin -> the table: the ID and a TAB first, so that
-# `cut -f 1` returns it; -V adds the date and an app's path.
+# `cut -f 1` returns it; with list --service, each row's service after the
+# client; -V adds the date and an app's path.
 render() {
-  awk -F '\t' -v vrb="$VRB" '
+  awk -F '\t' -v vrb="$VRB" -v svcol="$SERVICE_SEL" '
     { id[NR] = $1; c[NR] = $3; s[NR] = $4; n[NR] = $5; d[NR] = $6; x[NR] = $7
-      if (length($3) > w) w = length($3) }
+      sv[NR] = $8; sub(/^kTCCService/, "", sv[NR])
+      if (length($3) > w) w = length($3)
+      if (length(sv[NR]) > ws) ws = length(sv[NR]) }
     END {
       for (i = 1; i <= NR; i++) {
-        l = sprintf("%s\t%-" w "s  %-11s  ", id[i], c[i], s[i])
+        l = sprintf("%s\t%-" w "s  ", id[i], c[i])
+        if (svcol != "") l = l sprintf("%-" ws "s  ", sv[i])
+        l = l sprintf("%-11s  ", s[i])
         if (vrb == "1") l = l sprintf("%-19s  ", d[i])
         l = l n[i]
         if (vrb == "1" && x[i] != "-") l = l "  (" x[i] ")"
@@ -673,17 +688,28 @@ summary() {
     }'
 }
 
-# Every Full Disk Access grant, classified, into <FILE>.
-grants_to() { # <FILE>
+# Every Full Disk Access grant, classified, into <FILE> -- or, given a
+# <SERVICE>, the grants of the services whose name holds it (any case), or of
+# every service (all), as list --service asks.
+grants_to() { # <FILE> [<SERVICE>|all]
   [ -x "$c_sqlite3" ] || err 00024 "c_sqlite3='$c_sqlite3' is not executable (config: $CONFIG_FILE)"
+  _gw="service in ('$SERVICE', '$SERVICE_ES')"; _gm=1
+  case "${2:-}" in
+    "") ;;
+    all) _gw="1" ;;
+    *) _gw="instr(lower(service), lower('$(sql_q "$2")')) > 0"
+       # a profile's grants are Full Disk Access: listed only when that is asked for
+       _gl=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+       case "$(printf '%s' "$SERVICE" | tr '[:upper:]' '[:lower:]')" in *"$_gl"*) ;; *) _gm=0 ;; esac ;;
+  esac
   if ! "$c_sqlite3" -readonly -separator "$TAB" "$TCC_DB" \
-       "select service, client_type, client, auth_value, datetime(last_modified,'unixepoch','localtime') from access where service in ('$SERVICE', '$SERVICE_ES') order by client;" \
+       "select service, client_type, client, auth_value, datetime(last_modified,'unixepoch','localtime') from access where $_gw order by client, service;" \
        > "$WORK/rows" 2> "$WORK/rows.err"; then
     _e=$(cat "$WORK/rows.err")
     open_refused "$_e" && err 00025 "cannot read '$TCC_DB' ($_e) -- the Terminal running this needs Full Disk Access itself"
     err 00026 "sqlite3 failed on '$TCC_DB': $_e"
   fi
-  mdm_rows >> "$WORK/rows"
+  [ "$_gm" = "0" ] || mdm_rows >> "$WORK/rows"
   classify < "$WORK/rows" > "$1"
 }
 
@@ -1002,7 +1028,7 @@ list_off() { # <PATH> <client type> <client>
 cmd_list() {
   [ $# -eq 0 ] || err 00047 "list takes no arguments"
   PHASE="reading the grants -- nothing was changed"
-  grants_to "$WORK/all"
+  grants_to "$WORK/all" "$SERVICE_SEL"
   render < "$WORK/all"
   [ "$QUIET" = "1" ] || summary < "$WORK/all"
 }
@@ -2113,6 +2139,7 @@ _my-fda() {
                    '--since[from this local time on]:time (YYYY-MM-DD HH\:MM\:SS):' \\
                    '--until[with --since: up to this local time]:time (YYYY-MM-DD HH\:MM\:SS):' \\
                    '*:program, or a window such as 2h:_files' ;;
+        list)    _arguments '--service[a part of a service name, or all]:service:(all AllFiles AppBundles Accessibility)' ;;
         add)     _files ;;
         remove)  _arguments '--recommended[every grant list marks -> remove]' '*:ID:(go)' ;;
         cleanup|reset) _values 'act' go ;;
@@ -2614,6 +2641,27 @@ t_add_already_granted_opens_nothing() {
   if [ ! -e "$T_DIR/stub/open.log" ] && case "$_o" in *"already granted"*) true ;; *) false ;; esac
   then t_pass; else t_fail "'$_o'"; fi
 }
+# list --service: the grants of other TCC services, such as App Management
+# (horse 2026-11-13: a step could not see my-fda-my-system-update ON there).
+# A service column then names each row's service; the same client under two
+# services gets two IDs; a part of the name matches as denied --service does
+# (any case); without --service, list is Full Disk Access as before.
+t_list_service_shows_other_services_grants() {
+  t_grant 1 "$T_DIR/bin/tool"
+  t_grant 1 "$T_DIR/bin/tool" 2 kTCCServiceSystemPolicyAppBundles
+  t_grant 1 "$T_DIR/bin/other" 0 kTCCServiceSystemPolicyAppBundles
+  t_grant 0 com.example.app 2 kTCCServiceAccessibility
+  _d=$(QUIET=1 cmd_list)
+  case "$_d" in *AppBundles*|*Accessibility*|*"/bin/other"*) t_fail "default took another service: '$_d'"; return ;; esac
+  _o=$( (SERVICE_SEL=appbundles; QUIET=1; cmd_list) 2>&1)
+  case "$_o" in *"/bin/tool "*"SystemPolicyAppBundles  allowed[2]"*) ;; *) t_fail "tool: '$_o'"; return ;; esac
+  case "$_o" in *"/bin/other "*"SystemPolicyAppBundles  denied[0]"*) ;; *) t_fail "other: '$_o'"; return ;; esac
+  case "$_o" in *AllFiles*|*Accessibility*) t_fail "part took another: '$_o'"; return ;; esac
+  _a=$( (SERVICE_SEL=all; QUIET=1; cmd_list) 2>&1)
+  case "$_a" in *"SystemPolicyAllFiles"*"Accessibility"*|*"Accessibility"*"SystemPolicyAllFiles"*) ;; *) t_fail "all: '$_a'"; return ;; esac
+  _n=$(printf '%s\n' "$_a" | awk -F '\t' 'index($2, "'"$T_DIR"'/bin/tool ") == 1 { print $1 }' | sort -u | wc -l | tr -d ' ')
+  if [ "$_n" = "2" ]; then t_pass; else t_fail "one client, two services: $_n ID(s) in '$_a'"; fi
+}
 t_list_dates_are_local_time() {
   t_grant 1 "$T_DIR/bin/tool"                       # last_modified 1790000000
   _want=$(TZ=Pacific/Kiritimati date -r 1790000000 '+%Y-%m-%d %H:%M:%S')   # UTC+14: never the UTC date
@@ -2857,8 +2905,8 @@ t_denied_selects_the_services() {
   case "$_o" in *"(services matching 'VOLUMES')"*"/bin/vol "*) ;; *) t_fail "volumes: '$_o'"; return ;; esac
   _o=$( (SERVICE_SEL=all; cmd_denied) 2>&1)
   case "$_o" in *"/bin/dev"*"not a file protection: System Settings > Privacy & Security > DeveloperTool"*"3 refused check(s)"*"(every service)"*) ;; *) t_fail "all: '$_o'"; return ;; esac
-  _o=$("$(self_path)" --service all list 2>&1) && { t_fail "took list: '$_o'"; return; }
-  case "$_o" in *"--service goes with denied"*) t_pass ;; *) t_fail "list: '$_o'" ;; esac
+  _o=$("$(self_path)" --service all status 2>&1) && { t_fail "took status: '$_o'"; return; }
+  case "$_o" in *"--service goes with denied or list"*) t_pass ;; *) t_fail "status: '$_o'" ;; esac
 }
 t_denied_takes_a_program_by_name_or_path() {
   t_three_services
@@ -3665,7 +3713,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_listed_off_row_carries_the_code_requirement \
                 t_add_makes_its_own_launcher_readable t_add_refuses_a_file_others_cannot_read \
                 t_add_finds_a_grant_under_its_real_path t_add_through_a_link_shows_the_real_file \
-                t_list_dates_are_local_time \
+                t_list_dates_are_local_time t_list_service_shows_other_services_grants \
                 t_denied_names_the_program_how_often_and_via t_denied_joins_checks_by_tccd_and_msgid_not_by_order \
                 t_denied_says_what_to_do_from_the_grant t_denied_none_says_so_with_the_count \
                 t_denied_passes_the_window_and_refuses_a_bad_one t_denied_tells_an_ssh_login_from_a_job_with_no_parent \
@@ -3794,7 +3842,7 @@ esac
 [ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00129 "--user goes with create -- the user a new launcher runs its target as"
 [ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00130 "--group goes with create -- with --user, the primary group a new launcher takes"
 [ "$CATCH" = "0" ] || [ "$CMD" = denied ] || err 00131 "--catch goes with denied -- it waits for the next refused check"
-[ -z "$SERVICE_SEL" ] || [ "$CMD" = denied ] || err 00132 "--service goes with denied -- the TCC services whose refusals it reports"
+[ -z "$SERVICE_SEL" ] || [ "$CMD" = denied ] || [ "$CMD" = list ] || err 00132 "--service goes with denied or list -- the TCC services whose refusals it reports, or whose grants it lists"
 [ -z "$SINCE_ARG" ] || [ "$CMD" = denied ] || err 00133 "--since goes with denied -- the local time its window starts at"
 [ -z "$UNTIL_ARG" ] || [ "$CMD" = denied ] || err 00134 "--until goes with denied -- with --since, the local time its window ends at"
 [ "$RECOMMENDED" = "0" ] || [ "$CMD" = remove ] || err 00135 "--recommended goes with remove -- the grants '$US list' marks '$TO_REMOVE'"
