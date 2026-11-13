@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="448b618"
-SCRIPT_RELEASE="v0.2-24-g448b618"
+SCRIPT_COMMIT="ac76d7e"
+SCRIPT_RELEASE="v0.2-25-gac76d7e"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -3686,6 +3686,14 @@ t_dashed_verb_and_rm_name_the_verb() {
   case "$_i|$_g" in *"you mean"*"my-fda --install"*"|"*"--install goes alone"*) ;; *) t_fail "install: '$_i' / '$_g'"; return ;; esac
   case "$_a|$_b" in *"you mean"*"my-fda list"*"|"*"you mean"*"my-fda remove"*) t_pass ;; *) t_fail "got '$_a' / '$_b'" ;; esac
 }
+# Callers read -h to learn what this copy can do: my-rollout's steps library
+# looks for these two lines before it trusts list --service (any user's db
+# read, so a missing row means no grant). Rewording them breaks that check.
+t_help_keeps_the_lines_callers_probe() {
+  _h=$("$(self_path)" -h 2>&1)
+  case "$_h" in *"  list [--service <SERVICE>|all]"*) ;; *) t_fail "list line"; return ;; esac
+  case "$_h" in *"each user's own (USERS_DIR)"*) t_pass ;; *) t_fail "user dbs phrase" ;; esac
+}
 t_help_names_every_verb() {
   _h=$(usage); _bad=""
   for _v in list denied add remove cleanup reset create destroy status test; do
@@ -3786,7 +3794,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_config_setting_a_key_empty_names_it \
                 t_default_config_has_every_key t_config_offer_names_only_searched_paths t_site_conf_gives_the_bases_the_search_and_the_offer t_site_conf_behind_a_closed_folder_or_a_dangling_link_is_an_error t_config_reads_global_then_local t_install_records_whether_tcc_db_can_be_written t_install_without_full_disk_access_records_nothing t_install_creates_the_local_config_or_uses_the_one_read \
                 t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
-                t_help_names_every_verb t_completion_installs_once_and_names_every_verb t_err_codes_unique_in_order_without_gaps"
+                t_help_names_every_verb t_help_keeps_the_lines_callers_probe t_completion_installs_once_and_names_every_verb t_err_codes_unique_in_order_without_gaps"
   # Each test builds its own world, so the selected tests are dealt
   # round-robin into BLOCKS, one process per core, run in parallel (the
   # spread puts the slow ones -- cc builds -- in different blocks). A test
