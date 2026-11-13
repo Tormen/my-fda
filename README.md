@@ -241,8 +241,10 @@ write test (macOS refuses it once, there, not on every `list`). The line
 goes into `$CONFIG_LOCAL_DIR/my-fda.conf` (created when missing; without
 `CONFIG_LOCAL_DIR`, the config it read -- refused where the site has a
 `CONFIG_SEARCH_DIR`, whose configs every machine shares) and is committed
-where that is a git tree. A second run changes nothing and says so; run it
-again after a macOS update or a change of grant.
+where that is a git tree. Run where TCC.db cannot even be opened (no Full
+Disk Access), it records nothing and fails: the write was never tried. A
+second run changes nothing and says so; run it again after a macOS update or
+a change of grant.
 
 **A site file, read first.** `/LINKS/default/site.conf`, when it exists, is
 read before the config -- the one site path in my-fda. Plain `KEY="value"`
