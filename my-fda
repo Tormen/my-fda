@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="f4c47cd"
-SCRIPT_RELEASE="v0.2-26-gf4c47cd"
+SCRIPT_COMMIT="3ec44af"
+SCRIPT_RELEASE="v0.2-27-g3ec44af"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -211,7 +211,9 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 is counted, -V shows it. A check tccd could not answer (it
                 could not reach the tccd it forwards to) is the kernel's
                 refusal: no answer[why], the operation and the path, and
-                from: the program tccd was asked about. A kernel refusal
+                from: the program tccd was asked about. When that is "-" or
+                only a shell, nothing names the job: the hint is denied
+                --catch, never a launcher. A kernel refusal
                 with no tccd or sandboxd failure is another macOS
                 protection, not a privacy refusal: counted, -V shows it.
                 An answer whose request (the service) is not in the log
@@ -1560,8 +1562,17 @@ render_refusals() { # <grants FILE>
   cut -f 2 "$WORK/refused.in" | sort -u | while IFS= read -r _rc; do
     printf '%s\t%s\n' "$_rc" "$(grant_flag "$_rc")"
   done > "$WORK/flags"
-  awk -F '\t' -v vrb="$VRB" -v us="$US" -v svc="$SERVICE" '
+  awk -F '\t' -v vrb="$VRB" -v us="$US" -v svc="$SERVICE" -v shells="$SHELLS" '
     function short(x) { sub(/^kTCCService/, "", x); return x }
+    # nothing names the job: no responsible process, or only a shell (SHELLS)
+    # every script runs in -- com.apple.sh, sh[123], /bin/sh
+    function unnamed(r,   s, i, n) {
+      if (r == "-" || r == "") return 1
+      sub(/\[[0-9]+\]$/, "", r); sub(/^.*\//, "", r); sub(/^com\.apple\./, "", r)
+      n = split(shells, s, " ")
+      for (i = 1; i <= n; i++) { sub(/^.*\//, "", s[i]); if (r == s[i]) return 1 }
+      return 0
+    }
     FILENAME == ARGV[1] { g[$3] = $4; gd[$3] = $6; next }
     FILENAME == ARGV[2] { fl[$1] = $2; next }
     ($12 == "probe" || $12 == "unpaired" || ($12 == "refused" && $8 == "") || $17 == "1") && vrb != "1" { next }
@@ -1589,6 +1600,8 @@ render_refusals() { # <grants FILE>
           split(pn[k], q, SUBSEP)
           note = q[1] " " q[2] " -> " (q[3] == "none seen" \
             ? "no tccd answer in the log: catch the next one (" us " denied --catch)" \
+            : unnamed(q[4]) \
+            ? "tccd could not answer, and nothing names the job behind it: find it first (" us " denied --catch)" \
             : q[4] ~ /(^|\/)my-fda-[^\/]*(\[[0-9]+\])?$/ \
             ? "tccd could not answer, and it runs from what is already a my-fda launcher: no grant to add -- act only if what ran it failed" \
             : "tccd could not answer; a launcher with Full Disk Access is answered by the system tccd itself (" us " create)")
@@ -3018,6 +3031,24 @@ t_denied_a_no_answer_from_a_launcher_asks_for_no_launcher() {
   case "$_o" in *"tccd could not answer"*"($US create)"*) t_fail "asks for a launcher: '$_o'"; return ;; esac
   case "$_o" in *"tccd could not answer"*"already a my-fda launcher"*) t_pass ;; *) t_fail "hint: '$_o'" ;; esac
 }
+# tccd could not answer, and nothing names the job: the responsible process is
+# unknown (from -) or only the shell every script runs in (com.apple.sh) --
+# locate.updatedb's find at 03:15 on ada, macado and horse (2026-11-14). A
+# launcher for the shell would be a grant to every script: no launcher advice.
+t_denied_a_no_answer_with_no_job_named_asks_for_no_launcher() {
+  printf '%s\n' \
+    "2026-11-14 03:15:34.100 E  tccd[192:2d10ca2] [com.apple.TCC:access] one instance of XPC forwardMessage error: Connection invalid. (service=kTCCServiceSystemPolicyDesktopFolder, requestor=com.apple.sandboxd, target_pid=87096, target_id=com.apple.sh, auid=0)" \
+    "2026-11-14 03:15:34.101 E  kernel[0:2d10ca0] [com.apple.sandbox.reporting:violation] System Policy: find(87100) deny(1) file-read-data /Users/2watch/Desktop" \
+    "2026-11-14 03:17:55.200 E  sandboxd[186:2c9d550] tcc_server_message_request_authorization(kTCCServiceSystemPolicyDesktopFolder) failed: Error Domain=kTCCErrorDomain Code=2 \"missing 'auth_value' in reply message\" UserInfo={NSDescription=missing 'auth_value' in reply message}" \
+    "2026-11-14 03:17:55.201 E  kernel[0:2d10cb0] [com.apple.sandbox.reporting:violation] System Policy: find(87200) deny(1) file-read-data /Users/admin/Desktop" \
+    > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1)
+  case "$_o" in *"from com.apple.sh[87096]"*"/Users/2watch/Desktop"*) ;; *) t_fail "row, shell: '$_o'"; return ;; esac
+  case "$_o" in *"from -"*"/Users/admin/Desktop"*) ;; *) t_fail "row, no parent: '$_o'"; return ;; esac
+  case "$_o" in *"($US create)"*) t_fail "asks for a launcher: '$_o'"; return ;; esac
+  _n=$(printf '%s\n' "$_o" | awk '/tccd could not answer, and nothing names the job behind it/ && /denied --catch/ { n++ } END { print n+0 }')
+  if [ "$_n" = "2" ]; then t_pass; else t_fail "hint on $_n of 2 rows: '$_o'"; fi
+}
 t_denied_reports_a_refusal_tccd_never_answered() {
   t_real_noanswer > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
@@ -3779,7 +3810,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
     t_list_points_a_refused_tool_at_its_job_not_at_remove \
     t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal t_denied_a_probe_needs_the_very_next_allowed_request_of_that_process t_denied_an_answer_without_its_request_says_so t_denied_a_subject_without_its_request_says_so t_denied_an_attributed_answer_without_its_request_is_not_listed \
     t_denied_selects_the_services t_denied_takes_a_program_by_name_or_path t_denied_reports_without_the_grants \
-    t_denied_reports_a_refusal_tccd_never_answered t_denied_a_no_answer_from_a_launcher_asks_for_no_launcher t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second \
+    t_denied_reports_a_refusal_tccd_never_answered t_denied_a_no_answer_from_a_launcher_asks_for_no_launcher t_denied_a_no_answer_with_no_job_named_asks_for_no_launcher t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second \
     t_denied_service_part_leaves_out_an_unknown_service t_denied_since_reads_from_a_local_time t_denied_until_ends_a_since_window \
     t_denied_counts_kernel_refusals_with_no_privacy_check t_denied_tells_an_app_from_a_job t_denied_ignore_leaves_out_the_programs_named \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \

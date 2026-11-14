@@ -142,7 +142,10 @@ selection goes through the pipe `list` is made for:
       touch  SystemPolicySysAdminFiles  no answer[Connection invalid]  tccd system[0]  1x  last ...  via touch  from python3[18476]  file-write-create /private/etc/x -> ...
 
   With two failures of different services in that second, the service is
-  `?` -- never a guess. The kernel's side of a refusal tccd answered is not
+  `?` -- never a guess. When `from` is `-` or only a shell (`com.apple.sh`: every
+  script runs in one), nothing names the job, and the hint is `denied --catch`,
+  never a launcher -- a launcher for the shell would be a grant to every script.
+  The kernel's side of a refusal tccd answered is not
   listed twice. Its `Sandbox: ...` lines are other sandboxes' and are left
   out.
 - **A kernel refusal with no privacy check.** A `System Policy:` line with
