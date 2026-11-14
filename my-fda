@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="f886f1e"
-SCRIPT_RELEASE="v0.2-29-gf886f1e"
+SCRIPT_COMMIT="72953f4"
+SCRIPT_RELEASE="v0.2-30-g72953f4"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -427,19 +427,16 @@ CONFIG_KEYS="TCC_DB USERS_DIR BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BRE
   c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log c_ps c_lsof DENIED_LAST_DEFAULT c_pbcopy c_dscl c_id DENIED_SERVICES c_date c_git"
 
 # sh: 0 not there, 1 there ([ -r ] it: unreadable is the error), 2 cannot tell
+# Judged by the system's own answer, never by mode bits: macOS can refuse a
+# look the bits allow (TCC). On 2, _sa_m says why, for the error message.
 site_absent() {
-	_sa_p=$1
-	[ -e "$_sa_p" ] && return 1
-	[ -L "$_sa_p" ] && return 2
-	while :; do
-		_sa_d=$(dirname -- "$_sa_p")
-		[ "$_sa_d" = "$_sa_p" ] && return 0
-		if [ -e "$_sa_d" ] || [ -L "$_sa_d" ]; then
-			[ -d "$_sa_d" ] && [ -x "$_sa_d" ] && return 0
-			return 2
-		fi
-		_sa_p=$_sa_d
-	done
+	[ -e "$1" ] && return 1
+	_sa_m=$(LC_ALL=C ls -d -- "$1" 2>&1 > /dev/null)
+	case $_sa_m in *": No such file or directory") return 0 ;; esac
+	if [ -n "$_sa_m" ]; then _sa_m="the system says: ${_sa_m##*: }"
+	elif [ -L "$1" ]; then _sa_m="a link to nothing"
+	else _sa_m="listed, but it cannot be looked at"; fi
+	return 2
 }
 
 # The site's values for every tool, from SITE_CONF -- the one site path this
@@ -454,7 +451,7 @@ read_site() {
   [ "$_rs_rc" = 0 ] && return 0
   # there but unreadable: an error, never the neutral values -- they would
   # keep this user's state apart from everyone else's
-  [ "$_rs_rc" = 2 ] && err 00014 "cannot tell whether '$SITE_CONF' is there -- a link to nothing, or a folder on the way $(id -un) cannot search"
+  [ "$_rs_rc" = 2 ] && err 00014 "cannot tell whether '$SITE_CONF' is there -- $_sa_m"
   [ -r "$SITE_CONF" ] || err 00015 "cannot read '$SITE_CONF' -- the site's directories for every tool; its group must include $(id -un)"
   # shellcheck disable=SC1090  # the site file's path is a variable (tests point it elsewhere)
   . "$SITE_CONF" || err 00016 "'$SITE_CONF' failed to load"
@@ -3735,6 +3732,17 @@ t_site_conf_behind_a_closed_folder_or_a_dangling_link_is_an_error() {
   _o=$( (SITE_CONF="$T_DIR/absent.conf"; read_site; printf '%s|%s' "$DATA_BASE_DIR" "$LOG_BASE_DIR") 2>&1)
   if [ "$_o" = "/var/db|/var/log" ]; then t_pass; else t_fail "absent: '$_o'"; fi
 }
+# A look the system refuses although the mode bits allow it (macOS TCC):
+# the folder is searchable, the answer is "Operation not permitted" -- cannot
+# tell, never the neutral values. ls stands in for the kernel's answer.
+t_site_conf_refused_by_the_system_is_an_error_whatever_the_mode_bits() {
+  mkdir "$T_DIR/refused" "$T_DIR/fakebin"
+  # shellcheck disable=SC2016  # $3 belongs to the fake ls, expanded when it runs
+  printf '#!/bin/dash\necho "ls: $3: Operation not permitted" >&2\nexit 1\n' > "$T_DIR/fakebin/ls" && chmod 755 "$T_DIR/fakebin/ls"
+  # shellcheck disable=SC2031  # read_site sets it in this subshell
+  _o=$( (PATH="$T_DIR/fakebin:$PATH"; SITE_CONF="$T_DIR/refused/site.conf"; read_site; printf 'neutral:%s' "$DATA_BASE_DIR") 2>&1); _rc=$?
+  case "$_rc|$_o" in 1"|ERROR "*"cannot tell whether '$T_DIR/refused/site.conf' is there -- the system says: Operation not permitted"*) t_pass ;; *) t_fail "rc $_rc '$_o'" ;; esac
+}
 t_create_config_never_overwrites() {
   : > "$T_DIR/exists.conf"
   _o=$("$(self_path)" --create-config "$T_DIR/exists.conf" 2>&1); _rc=$?
@@ -3857,7 +3865,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_test_refuses_unused_and_ambiguous t_destroy_shows_then_go_deletes_launcher_and_grant \
                 t_list_refuses_without_root t_old_config_takes_new_keys_from_the_defaults \
                 t_config_setting_a_key_empty_names_it \
-                t_default_config_has_every_key t_config_offer_names_only_searched_paths t_site_conf_gives_the_bases_the_search_and_the_offer t_site_conf_behind_a_closed_folder_or_a_dangling_link_is_an_error t_config_reads_global_then_local t_install_records_whether_tcc_db_can_be_written t_install_without_full_disk_access_records_nothing t_install_creates_the_local_config_or_uses_the_one_read \
+                t_default_config_has_every_key t_config_offer_names_only_searched_paths t_site_conf_gives_the_bases_the_search_and_the_offer t_site_conf_behind_a_closed_folder_or_a_dangling_link_is_an_error t_site_conf_refused_by_the_system_is_an_error_whatever_the_mode_bits t_config_reads_global_then_local t_install_records_whether_tcc_db_can_be_written t_install_without_full_disk_access_records_nothing t_install_creates_the_local_config_or_uses_the_one_read \
                 t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
                 t_help_names_every_verb t_help_keeps_the_lines_callers_probe t_completion_installs_once_and_names_every_verb t_err_codes_unique_in_order_without_gaps"
   # Each test builds its own world, so the selected tests are dealt
