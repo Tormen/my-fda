@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="ac76d7e"
-SCRIPT_RELEASE="v0.2-25-gac76d7e"
+SCRIPT_COMMIT="f4c47cd"
+SCRIPT_RELEASE="v0.2-26-gf4c47cd"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -1703,9 +1703,14 @@ cmd_denied() { # [PROGRAM] [LAST]
   msg " >>> tccd's checks in the system log $_of ($_scope) -- a long window takes a while"
   run "$c_log" show --style compact "$@" --predicate "$REFUSAL_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
     || err 00080 "log show failed: $(cat "$WORK/log.err")"
-  # what was read, raw: tccd's answers, and the kernel's refusals when any
-  _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ } $4 ~ /^kernel\[/ && / System Policy: [^(]+\([0-9]+\) deny\(/ { k++ }
-    END { printf "%d%s", n, (k ? "; kernel refusals read: " k : "") }' "$WORK/log")
+  # what was read, raw -- tccd's answers, the checks it could not answer
+  # (its own forwarding error, or sandboxd's), the kernel's refusals --
+  # each part only when not 0; with all 0 the bracket is left out
+  _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ }
+    ($4 ~ /^tccd\[/ && index($0, "forwardMessage error: ")) || ($4 ~ /^sandboxd\[/ && index($0, "tcc_server_message_request_authorization(")) { f++ }
+    $4 ~ /^kernel\[/ && / System Policy: [^(]+\([0-9]+\) deny\(/ { k++ }
+    function part(s, v) { if (v) o = o (o == "" ? "" : "; ") s v }
+    END { part("tccd answers read: ", n); part("tccd failures read: ", f); part("kernel refusals read: ", k); if (o != "") printf " [%s]", o }' "$WORK/log")
   refusals "" "$_progarg" < "$WORK/log" > "$WORK/checks"
   # listed: refused, and refused with no answer, unless DENIED_IGNORE names
   # the program; counted, and shown only with -V: probes, kernel refusals
@@ -1723,7 +1728,7 @@ cmd_denied() { # [PROGRAM] [LAST]
   [ "$_un" = "0" ] || _pr="$_pr; $_un answer(s) whose request is not in the log"
   [ -z "$_pr" ] || _pr="$_pr (-V)"
   if [ ! -s "$WORK/refused" ] && { [ "$((_pb + _ot + _ig + _un))" = "0" ] || [ "$VRB" != "1" ]; }; then
-    msg "nothing refused $_in ($_scope)$_pr [tccd checks read: $_r]"
+    msg "nothing refused $_in ($_scope)$_pr$_r"
     return 0
   fi
   # The grants say what to do; without Full Disk Access (a LaunchDaemon)
@@ -1736,7 +1741,7 @@ cmd_denied() { # [PROGRAM] [LAST]
   render_refusals "$WORK/all" < "$WORK/checks"
   [ "$QUIET" = "1" ] || awk -F '\t' -v win="$_in" -v scope="$_scope" -v pr="$_pr" -v r="$_r" '
     { rows++; if (!($2 in c)) { c[$2]; progs++ } }
-    END { printf "%d refused check(s) from %d program(s) %s (%s)%s [tccd checks read: %s]\n", rows, progs, win, scope, pr, r }' "$WORK/refused"
+    END { printf "%d refused check(s) from %d program(s) %s (%s)%s%s\n", rows, progs, win, scope, pr, r }' "$WORK/refused"
 }
 
 # denied --catch: the next refusals as they happen, each with the refused
@@ -2772,7 +2777,7 @@ t_denied_none_says_so_with_the_count() {
   t_check 191 1.1 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2 > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
   if [ "$_o" = " >>> tccd's checks in the system log of the last 1d (services kTCCServiceSystemPolicy*) -- a long window takes a while
-nothing refused in the last 1d (services kTCCServiceSystemPolicy*) [tccd checks read: 1]" ]; then t_pass; else t_fail "got '$_o'"; fi
+nothing refused in the last 1d (services kTCCServiceSystemPolicy*) [tccd answers read: 1]" ]; then t_pass; else t_fail "got '$_o'"; fi
 }
 # One program refused from an ssh login and from a job with no parent macOS
 # names: two causes, two fixes -- folded into one row, the ssh one would hide
@@ -2863,7 +2868,7 @@ t_real_probe() { # the lines, in their order
 t_denied_a_probe_a_narrower_grant_allowed_is_no_refusal() {
   t_real_probe > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
-  case "$_o" in *"nothing refused in the last 1d"*"; 1 probe(s) a narrower grant then allowed (-V) [tccd checks read: 2]"*) ;; *) t_fail "default: '$_o'"; return ;; esac
+  case "$_o" in *"nothing refused in the last 1d"*"; 1 probe(s) a narrower grant then allowed (-V) [tccd answers read: 2]"*) ;; *) t_fail "default: '$_o'"; return ;; esac
   case "$_o" in *python3.15*SystemPolicy*) t_fail "the probe is listed as refused: '$_o'"; return ;; esac
   _o=$(VRB=1 cmd_denied 2>&1)
   case "$_o" in *"python3.15  SystemPolicyAllFiles  denied[0] reason[5]  tccd system[0]  1x  first 2026-11-10 22:49:01"*"probe: then SystemPolicyRemovableVolumes allowed[2] reason[2] by tccd tester[1001]"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
@@ -3020,7 +3025,7 @@ t_denied_reports_a_refusal_tccd_never_answered() {
   case "$_o" in *"touch "*"SystemPolicySysAdminFiles  no answer[Connection invalid] "*" tccd system[0]  1x  last 2026-11-11 00:09:02  via touch "*"from python3[18476]  file-write-create /private/etc/postfix/.probe -> tccd could not answer"*) ;; *) t_fail "00:09: '$_o'"; return ;; esac
   case "$_o" in *"postconf "*"SystemPolicySysAdminFiles  no answer[missing 'auth_value' in reply message]  tccd ?"*"1x  last 2026-11-10 23:52:15"*"file-write-create /private/etc/postfix/master.cf.tmp"*) ;; *) t_fail "23:52, master.cf: '$_o'"; return ;; esac
   case "$_o" in *"3x  last 2026-11-10 23:52:19"*"file-write-create /private/etc/postfix/main.cf.tmp"*) ;; *) t_fail "23:52, main.cf: '$_o'"; return ;; esac
-  case "$_o" in *"5 refused check(s) from 2 program(s)"*"[tccd checks read: 0; kernel refusals read: 5]"*) ;; *) t_fail "summary: '$_o'"; return ;; esac
+  case "$_o" in *"5 refused check(s) from 2 program(s)"*"[tccd failures read: 5; kernel refusals read: 5]"*) ;; *) t_fail "summary (no zero count, tccd's failures counted): '$_o'"; return ;; esac
   _o=$(VRB=1 cmd_denied 2>&1)
   case "$_o" in *"from python3-55554944e9d00cc08b2730af91d9f8cbc50e2ba2[18476]"*) t_pass ;; *) t_fail "-V: '$_o'" ;; esac
 }
