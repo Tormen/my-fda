@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="3ec44af"
-SCRIPT_RELEASE="v0.2-27-g3ec44af"
+SCRIPT_COMMIT="28b447b"
+SCRIPT_RELEASE="v0.2-28-g28b447b"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -193,6 +193,7 @@ GRANTS -- the "+" and "-" of System Settings > Full Disk Access
                 service, and whose database holds the row (system, or a
                 user's name). The notes above are Full Disk Access's. A
                 step asks whether a program is ON by its row's allowed[2].
+                No row is OFF on macOS 26 -- elsewhere a step cannot tell.
   denied [<PROGRAM>] [<LAST> | --since <TIME> [--until <TIME>]] [--service <SERVICE>|all]
                 every file check macOS refused a program, from tccd's lines
                 in the system log of the last LAST (30m, 2h, 3d or boot;
@@ -3723,12 +3724,17 @@ t_dashed_verb_and_rm_name_the_verb() {
   case "$_a|$_b" in *"you mean"*"my-fda list"*"|"*"you mean"*"my-fda remove"*) t_pass ;; *) t_fail "got '$_a' / '$_b'" ;; esac
 }
 # Callers read -h to learn what this copy can do: my-rollout's steps library
-# looks for these two lines before it trusts list --service (any user's db
-# read, so a missing row means no grant). Rewording them breaks that check.
+# looks for these three lines before it trusts list --service (any user's db
+# read, so a missing row means no grant), and on which macOS majors that
+# holds (the majors after "No row is OFF on macOS ", read up to the first
+# character that is not a digit, comma or space -- on one line, never
+# wrapped). Rewording them breaks that check.
 t_help_keeps_the_lines_callers_probe() {
   _h=$("$(self_path)" -h 2>&1)
   case "$_h" in *"  list [--service <SERVICE>|all]"*) ;; *) t_fail "list line"; return ;; esac
-  case "$_h" in *"each user's own (USERS_DIR)"*) t_pass ;; *) t_fail "user dbs phrase" ;; esac
+  case "$_h" in *"each user's own (USERS_DIR)"*) ;; *) t_fail "user dbs phrase"; return ;; esac
+  _m=$(printf '%s\n' "$_h" | awk 'index($0, "No row is OFF on macOS ") { s = substr($0, index($0, "No row is OFF on macOS ") + 23); match(s, /^[0-9, ]*/); print substr(s, 1, RLENGTH) }')
+  case "$_m" in "26 ") t_pass ;; *) t_fail "macOS majors line: '$_m'" ;; esac
 }
 t_help_names_every_verb() {
   _h=$(usage); _bad=""
