@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="72953f4"
-SCRIPT_RELEASE="v0.2-30-g72953f4"
+SCRIPT_COMMIT="76e924b"
+SCRIPT_RELEASE="v0.2-31-g76e924b"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -726,14 +726,10 @@ grants_to() { # <FILE> [<SERVICE>|all]
   if [ -n "${2:-}" ]; then
     for _ud in "$USERS_DIR"/*; do
       _uf="$_ud/Library/Application Support/com.apple.TCC/TCC.db"
-      # [ -e ] also answers "no" for a file macOS will not let it look at
-      # (TCC refuses at the call, the mode bits still allow it): only
-      # ENOENT is "not there", anything else leaves a row's absence unknown
-      if [ ! -e "$_uf" ]; then
-        _m=$(ls -d -- "$_uf" 2>&1 > /dev/null)
-        case "$_m" in *": No such file or directory") continue ;; esac
-        err 00027 "cannot tell whether '$_uf' is there (${_m##*: }) -- a row it holds would read as missing; this needs Full Disk Access"
-      fi
+      # one macOS will not let it look at leaves a row's absence unknown
+      _ua=0; site_absent "$_uf" || _ua=$?
+      [ "$_ua" = 0 ] && continue
+      [ "$_ua" = 2 ] && err 00027 "cannot tell whether '$_uf' is there ($_sa_m) -- a row it holds would read as missing; this needs Full Disk Access"
       _un=${_ud##*/}
       if ! "$c_sqlite3" -readonly -separator "$TAB" "$_uf" "$(printf '%s' "$_gq" | sed "s/'system'/'$(sql_q "$_un")'/")" >> "$WORK/rows" 2> "$WORK/rows.err"; then
         _e=$(cat "$WORK/rows.err")
