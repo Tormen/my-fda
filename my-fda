@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="76e924b"
-SCRIPT_RELEASE="v0.2-31-g76e924b"
+SCRIPT_COMMIT="67bff51"
+SCRIPT_RELEASE="v0.2-32-g67bff51"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -45,7 +45,7 @@ say() { printf '%s\n' "$*"; }                          # a plan a destructive st
 warn() { printf '%s\n' "$*" 1>&2; }
 
 # Echo a command under -V, then run it: one source for both.
-run() {
+run_echoed() {
   [ "$VRB" = "1" ] && printf ' >>> %s\n' "$*"
   "$@"
 }
@@ -782,7 +782,7 @@ backup_tcc() {
   chmod 700 "$BACKUP_DIR" || err 00031 "cannot chmod 700 '$BACKUP_DIR'"
   BACKUP_FILE="$BACKUP_DIR/TCC.db.$BACKUP_STAMP"
   [ -e "$BACKUP_FILE" ] && BACKUP_FILE="$BACKUP_FILE.$$"
-  run "$c_sqlite3" "$TCC_DB" ".backup '$BACKUP_FILE'" \
+  run_echoed "$c_sqlite3" "$TCC_DB" ".backup '$BACKUP_FILE'" \
     || err 00032 "backup of '$TCC_DB' to '$BACKUP_FILE' failed -- nothing was changed"
   [ -s "$BACKUP_FILE" ] || err 00033 "backup '$BACKUP_FILE' is empty -- nothing was changed"
 }
@@ -939,10 +939,10 @@ as_screen_user() { # <command...>
     _cu=$(/bin/ls -ln /dev/console 2>/dev/null | awk '{ print $3 }')
     case "$_cu" in
       ""|0|*[!0-9]*) ;;
-      *) run "$c_launchctl" asuser "$_cu" "$@"; return ;;
+      *) run_echoed "$c_launchctl" asuser "$_cu" "$@"; return ;;
     esac
   fi
-  run "$@"
+  run_echoed "$@"
 }
 gui_open() { as_screen_user "$c_open" "$@"; }   # <open args...>
 
@@ -1011,7 +1011,7 @@ sqlite_delete() { # <FILE>
   DELETED=$(printf '%s\n' "$_out" | sed -n 1p)
   REMAINING=$(printf '%s\n' "$_out" | sed -n 2p)
   [ "$REMAINING" = "0" ] || err 00047 "grants still there after the delete [rows deleted $DELETED, remaining $REMAINING] -- backup: $BACKUP_FILE"
-  run "$c_killall" tccd > /dev/null 2>&1 \
+  run_echoed "$c_killall" tccd > /dev/null 2>&1 \
     || warn "    > could not restart tccd ($c_killall tccd) -- it may show the old grants until it restarts"
 }
 
@@ -1050,7 +1050,7 @@ list_off() { # <PATH> <client type> <client>
   [ "$VRB" = "1" ] && printf ' >>> %s %s "insert into access (%s) ..."\n' "$c_sqlite3" "$TCC_DB" "$_cols"
   "$c_sqlite3" -bail "$TCC_DB" "INSERT INTO access ($_cols) VALUES ($_vals);" > "$WORK/insert.out" 2>&1 \
     || err 00049 "cannot list $1 in TCC.db: $(cat "$WORK/insert.out") -- backup: $BACKUP_FILE"
-  run "$c_killall" tccd > /dev/null 2>&1 \
+  run_echoed "$c_killall" tccd > /dev/null 2>&1 \
     || warn "    > could not restart tccd ($c_killall tccd) -- the pane may show it only after a restart"
 }
 
@@ -1120,7 +1120,7 @@ cmd_add() { # <PATH>
   if ! screen_user_can r "$_p"; then
     case "$_p" in
       "$HELPER_DIR"/my-fda-*)
-        run chmod 744 "$_p" || err 00055 "cannot make '$_p' readable (chmod 744)"
+        run_echoed chmod 744 "$_p" || err 00055 "cannot make '$_p' readable (chmod 744)"
         msg "    > $_p made readable (744): System Settings, running as you, reads it to add it" ;;
       *) err 00056 "'$_p' is not readable by the screen's user ($SCREEN_USER) -- System Settings runs as that user and cannot add it: chmod a+r '$_p' first" ;;
     esac
@@ -1717,7 +1717,7 @@ cmd_denied() { # [PROGRAM] [LAST]
   refusal_scope "$_prog"
   PHASE="reading the system log -- nothing was changed"
   msg " >>> tccd's checks in the system log $_of ($_scope) -- a long window takes a while"
-  run "$c_log" show --style compact "$@" --predicate "$REFUSAL_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
+  run_echoed "$c_log" show --style compact "$@" --predicate "$REFUSAL_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
     || err 00081 "log show failed: $(cat "$WORK/log.err")"
   # what was read, raw -- tccd's answers, the checks it could not answer
   # (its own forwarding error, or sandboxd's), the kernel's refusals --
@@ -1995,13 +1995,13 @@ cmd_create() { # [NAME] <TARGET>
     err 00103 "no compiler: needs the Command Line Tools -- xcode-select --install"
   fi
   if [ ! -d "$HELPER_DIR" ]; then
-    if [ "$(id -u)" = "0" ]; then run install -d -m 755 -o root -g wheel "$HELPER_DIR"
-    else run install -d -m 755 "$HELPER_DIR"; fi || err 00104 "cannot create '$HELPER_DIR'"
+    if [ "$(id -u)" = "0" ]; then run_echoed install -d -m 755 -o root -g wheel "$HELPER_DIR"
+    else run_echoed install -d -m 755 "$HELPER_DIR"; fi || err 00104 "cannot create '$HELPER_DIR'"
     msg "    > $HELPER_DIR (created: it did not exist -- macOS's place for root's helper programs)"
   fi
   PHASE="building the launcher -- nothing was installed yet"
   launcher_c > "$WORK/launcher.c"
-  run "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" "-DMY_FDA_RUN_UID=$LAUNCHER_UID" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} ${GROUP_ARG:+"-DMY_FDA_GROUP=\"$GROUP_ARG\""} \
+  run_echoed "$c_cc" -O2 -Wall "-DMY_FDA_TARGET=\"$_t\"" "-DMY_FDA_NAME=\"$1\"" "-DMY_FDA_RUN_UID=$LAUNCHER_UID" ${USER_ARG:+"-DMY_FDA_USER=\"$USER_ARG\""} ${GROUP_ARG:+"-DMY_FDA_GROUP=\"$GROUP_ARG\""} \
     -o "$WORK/launcher" "$WORK/launcher.c" > "$WORK/cc.log" 2>&1 \
     || err 00105 "cc failed: $(cat "$WORK/cc.log")"
   [ "$(marker_of "$WORK/launcher")" = "$_t" ] \
@@ -2014,13 +2014,13 @@ cmd_create() { # [NAME] <TARGET>
   # pane takes such a file with + but loses it when dragged in (macOS 27,
   # 2026-10-26). A program with a real ad-hoc signature under its own name
   # is dragged in like any other program.
-  run "$c_codesign" -s - -f -o runtime -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
+  run_echoed "$c_codesign" -s - -f -o runtime -i "my-fda-$1" "$WORK/launcher" > "$WORK/sign.log" 2>&1 \
     || err 00109 "codesign failed: $(cat "$WORK/sign.log") -- not installed"
   # 755: System Settings, running as the screen's user, loses a dragged-in
   # program that user cannot execute (2026-10-26); the launcher itself
   # refuses to run as anyone but root, so executing it grants nothing
-  if [ "$(id -u)" = "0" ]; then run install -m 755 -o root -g wheel "$WORK/launcher" "$_l"
-  else run install -m 755 "$WORK/launcher" "$_l"; fi || err 00110 "cannot install '$_l'"
+  if [ "$(id -u)" = "0" ]; then run_echoed install -m 755 -o root -g wheel "$WORK/launcher" "$_l"
+  else run_echoed install -m 755 "$WORK/launcher" "$_l"; fi || err 00110 "cannot install '$_l'"
   msg "created $_l -> $_t${USER_ARG:+, as $USER_ARG${GROUP_ARG:+:$GROUP_ARG}} [marker ok]"
   msg "--> next: $US add $_l -- then point the LaunchDaemon's Program at it${USER_ARG:+ (and no UserName in it)}, and $US test $1"
 }
@@ -2094,7 +2094,7 @@ cmd_test() { # <NAME>
     err 00116 "$_pl runs it as $_un, but $_l drops to $_as itself and must start as root -- take UserName out of the plist"
   fi
   PHASE="starting system/$_lb -- if it started, it runs on under launchd"
-  if ! run "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
+  if ! run_echoed "$c_launchctl" kickstart "system/$_lb" > "$WORK/kick" 2>&1; then
     err 00117 "launchctl kickstart system/$_lb failed: $(cat "$WORK/kick") -- is it loaded? launchctl bootstrap system $_pl"
   fi
   _log=$("$c_plutil" -extract StandardErrorPath raw -o - "$_pl" 2>/dev/null) \
@@ -2124,7 +2124,7 @@ cmd_destroy() { # [go] <NAME>
   fi
   [ -s "$WORK/sel" ] && take_away "$WORK/sel"
   PHASE="deleting the launcher -- its grant is already gone"
-  run rm -f "$_l" || err 00119 "cannot delete '$_l'"
+  run_echoed rm -f "$_l" || err 00119 "cannot delete '$_l'"
   if [ -s "$WORK/sel" ]; then
     msg "destroyed $_l, its grant $TOOK -- TCC.db backup: $BACKUP_FILE"
   else
