@@ -1,0 +1,19 @@
+# my-fda's commit gate (my-rollout gate): a test tied to a definition it depends on without naming it
+# <definition> TAB <test title> TAB <the case> -- py/my-rollout's README.md, "The commit gate"
+launcher	t_remove_recommended_refuses_ids_and_other_commands	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_denied_catch_takes_no_window_and_goes_with_denied_only	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_denied_selects_the_services	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_denied_since_reads_from_a_local_time	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_denied_until_ends_a_since_window	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_create_user_refuses_what_it_must	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_create_group_refuses_what_it_must	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_list_refuses_without_root	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_create_config_never_overwrites	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_dashed_verb_and_rm_name_the_verb	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_help_keeps_the_lines_callers_probe	runs my-fda as a program: the option checks and the dispatch are the launcher's lines
+launcher	t_completion_installs_once_and_names_every_verb	reads the dispatch's verb line: the completion must name every verb
+launcher	t_ctrl_c_at_the_wait_ends_in_one_line_and_130	sources every line before main: the settings at the top are the launcher's
+need_root	t_list_refuses_without_root	reaches it only through a run of my-fda list
+usage	t_help_keeps_the_lines_callers_probe	reaches it only through a run of my-fda -h
+create_config	t_create_config_never_overwrites	reaches it only through a run of my-fda --create-config
+err	t_dashed_verb_and_rm_name_the_verb	reads err's line only through a run of my-fda

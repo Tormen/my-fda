@@ -284,6 +284,12 @@ A title no test has fails a `--titles` run. A title is its test function's
 name; titles starting `the suite:` read the source only (every test is in the
 run list once; the error codes run in order).
 
+A commit of this folder in /LINKS/src runs only the tests it needs: `my-rollout
+gate sh/my-fda` picks those whose function names a definition the change
+touched, those `my-fda.tests.links` ties to one (the tests that run my-fda as a
+program, for its dispatch), and the static ones, and runs them by `--titles`;
+the pre-commit hook refuses a commit without that pass.
+
 They run against a TCC.db of their own, with stubs for launchctl, open and
 Spotlight -- never against the real one, and without root.
 
