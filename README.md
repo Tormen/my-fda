@@ -276,7 +276,13 @@ says nothing. The launcher names it offers are those in `HELPER_DIR`.
 
 ## Tests
 
-    my-fda --run-tests [<FILTER>]
+    my-fda --run-tests [<FILTER>]          the tests whose title holds FILTER
+    my-fda --run-tests --list              the run list: "<title> TAB <its function>"
+    my-fda --run-tests --titles <FILE>     exactly the tests whose titles FILE lists
+
+A title no test has fails a `--titles` run. A title is its test function's
+name; titles starting `the suite:` read the source only (every test is in the
+run list once; the error codes run in order).
 
 They run against a TCC.db of their own, with stubs for launchctl, open and
 Spotlight -- never against the real one, and without root.

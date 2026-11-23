@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="67bff51"
-SCRIPT_RELEASE="v0.2-32-g67bff51"
+SCRIPT_COMMIT="321cf09"
+SCRIPT_RELEASE="v0.2-33-g321cf09"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -316,7 +316,11 @@ OPTIONS
                         committed: list reads it, and never tests -- an error when
                         TCC.db cannot be opened (no Full Disk Access)
   --run-tests [<FILTER>]
-                        run the built-in tests (name substring)
+                        run the built-in tests whose title holds FILTER
+  --run-tests --list    the run list, one "<title> TAB <its function>" per test
+  --run-tests --titles <FILE>
+                        run exactly the tests whose titles FILE lists, one per
+                        line -- a title no test has fails the run
   --stamp-version       record the commit in this file (maintainer)
   --version             version, git describe, build id
   -h, --help            this help
@@ -3804,8 +3808,31 @@ t_err_codes_unique_in_order_without_gaps() {
   if [ "$_got" = "$_want" ]; then t_pass; else t_fail "codes '$_got'"; fi
 }
 
-run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not ok K - name" per test
-  T_ALL="t_gone_path_is_gone t_existing_cellar_path_still_breaks \
+t_every_test_is_in_the_run_list() {
+  # a test the run list leaves out never runs, and a second definition silently replaces the first;
+  # a t_ function the list does not name is a helper, so another line names it
+  run_list > "$T_DIR/list"
+  _bad=$(awk -F '\t' '
+    FILENAME == ARGV[1] { if (title[$1]++) print "title twice: " $1; if (listed[$2]++) print "listed twice: " $2; next }
+    /^t_[A-Za-z0-9_]*\(\) *\{/ { n = $0; sub(/\(.*/, "", n); if (def[n]++) print "defined twice: " n }
+    { line[++nl] = $0 }
+    END {
+      for (f in listed) if (!(f in def)) print "listed, never defined: " f
+      for (f in def) if (!(f in listed)) {
+        c = 0
+        for (i = 1; i <= nl && c < 2; i++) if (line[i] ~ ("(^|[^A-Za-z0-9_])" f "([^A-Za-z0-9_]|$)")) c++
+        if (c < 2) print "defined, never run: " f
+      }
+    }' "$T_DIR/list" "$(self_path)" | sort | awk '{ printf "%s%s", (NR > 1 ? "; " : ""), $0 }')
+  if [ -z "$_bad" ]; then t_pass; else t_fail "$_bad"; fi
+}
+
+# The run list: one test per line, "<title> TAB <its function>", in the order they are numbered --
+# the one place that says which tests there are and what they are called (--run-tests --list). A
+# title is its function's name; one starting "the suite:" reads the source only, so my-rollout's
+# commit gate runs it with every change.
+run_list() {
+  _rl_tests="t_gone_path_is_gone t_existing_cellar_path_still_breaks \
                 t_found_app_is_app_with_its_path t_missing_app_is_gone \
                 t_nested_helper_is_not_gone \
                 t_missing_apple_app_is_never_gone t_spotlight_off_calls_no_app_gone \
@@ -3863,7 +3890,21 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
                 t_config_setting_a_key_empty_names_it \
                 t_default_config_has_every_key t_config_offer_names_only_searched_paths t_site_conf_gives_the_bases_the_search_and_the_offer t_site_conf_behind_a_closed_folder_or_a_dangling_link_is_an_error t_site_conf_refused_by_the_system_is_an_error_whatever_the_mode_bits t_config_reads_global_then_local t_install_records_whether_tcc_db_can_be_written t_install_without_full_disk_access_records_nothing t_install_creates_the_local_config_or_uses_the_one_read \
                 t_create_config_never_overwrites t_dashed_verb_and_rm_name_the_verb \
-                t_help_names_every_verb t_help_keeps_the_lines_callers_probe t_completion_installs_once_and_names_every_verb t_err_codes_unique_in_order_without_gaps"
+                t_help_names_every_verb t_help_keeps_the_lines_callers_probe t_completion_installs_once_and_names_every_verb"
+  for _rl_f in $_rl_tests; do printf '%s\t%s\n' "$_rl_f" "$_rl_f"; done
+  for _rl_f in t_every_test_is_in_the_run_list t_err_codes_unique_in_order_without_gaps; do
+    printf 'the suite: %s\t%s\n' "$_rl_f" "$_rl_f"
+  done
+}
+
+run_tests() { # [FILTER] | --titles FILE -- TAP-style: "1..N" first, then "ok K - title" / "not ok K - title" per test
+  # The tests whose title holds FILTER (all without one), or exactly those whose titles FILE
+  # lists, one per line: a title the run list does not hold is said, and fails the run -- a
+  # gate never passes on a test it did not run.
+  if [ "${1:-}" = "--titles" ]; then
+    _rt_e=$( { : < "${2:-}"; } 2>&1 ) \
+      || err 00120 "--run-tests --titles needs a file of test titles, one per line: '${2:-}' cannot be read -- the system says: ${_rt_e##*: }"
+  fi
   # Each test builds its own world, so the selected tests are dealt
   # round-robin into BLOCKS, one process per core, run in parallel (the
   # spread puts the slow ones -- cc builds -- in different blocks). A test
@@ -3871,11 +3912,18 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
   # one write, so the lines never mix; what a block prints besides comes as
   # one piece at the end. A block that dies leaves its tests "not ok".
   _rt_tb=$(mktemp -d "${TMPDIR:-/tmp}/my-fda-tests.XXXXXX") || exit 1
-  _rt_k=0
-  for T_NAME in $T_ALL; do
-    case "$T_NAME" in *"$1"*) _rt_k=$((_rt_k + 1)); printf '%s %s\n' "$_rt_k" "$T_NAME" >> "$_rt_tb/selected" ;; esac
-  done
-  _rt_n=$_rt_k
+  run_list > "$_rt_tb/list"
+  : > "$_rt_tb/unknown"
+  if [ "${1:-}" = "--titles" ]; then
+    awk -F '\t' 'FILENAME == ARGV[1] { want[$0] = 1; next } ($1 in want) { print ++k "\t" $2 "\t" $1 }' \
+      "$2" "$_rt_tb/list" > "$_rt_tb/selected"
+    awk -F '\t' 'FILENAME == ARGV[1] { have[$1] = 1; next } $0 != "" && !($0 in have)' \
+      "$_rt_tb/list" "$2" > "$_rt_tb/unknown"
+  else
+    awk -F '\t' -v f="${1:-}" 'f == "" || index($1, f) { print ++k "\t" $2 "\t" $1 }' \
+      "$_rt_tb/list" > "$_rt_tb/selected"
+  fi
+  _rt_n=$(awk 'END { print NR }' "$_rt_tb/selected")
   T_STUBS="$_rt_tb/stubs"; t_stubs "$T_STUBS"
   echo "1..$_rt_n"
   _rt_b=$(sysctl -n hw.ncpu 2>/dev/null) || _rt_b=1
@@ -3884,10 +3932,10 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
   _rt_i=0
   while [ "$_rt_i" -lt "$_rt_b" ]; do
     (
-      while read -r _rt_k T_NAME; do
+      while IFS="$TAB" read -r _rt_k _rt_fn T_NAME; do
         [ $(((_rt_k - 1) % _rt_b)) = "$_rt_i" ] || continue
         _rt_bad=$T_BAD
-        { t_world; "$T_NAME"; } >> "$_rt_tb/detail.$_rt_i" 2>&1
+        { t_world; "$_rt_fn"; } >> "$_rt_tb/detail.$_rt_i" 2>&1
         rm -rf "$T_DIR"
         if [ "$T_BAD" = "$_rt_bad" ]; then _rt_r="ok"; else _rt_r="not ok"; fi
         echo "$_rt_r $_rt_k - $T_NAME"
@@ -3901,7 +3949,7 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
   cat "$_rt_tb"/detail.* 2>/dev/null
   # a test with no result line: its block died -- it did not pass
   cat "$_rt_tb"/result.* 2>/dev/null | cut -d ' ' -f 1 | sort -n > "$_rt_tb/done"
-  while read -r _rt_k T_NAME; do
+  while IFS="$TAB" read -r _rt_k _rt_fn T_NAME; do
     grep -qx "$_rt_k" "$_rt_tb/done" && continue
     echo "not ok $_rt_k - $T_NAME (its block ended before it)"; T_BAD=$((T_BAD + 1))
   done < "$_rt_tb/selected"
@@ -3909,8 +3957,11 @@ run_tests() { # [FILTER] -- TAP-style: "1..N" first, then "ok K - name" / "not o
     [ -f "$_rt_c" ] || continue
     read -r _rt_o _rt_f < "$_rt_c"; T_OK=$((T_OK + _rt_o)); T_BAD=$((T_BAD + _rt_f))
   done
+  _rt_un=$(awk 'END { print NR }' "$_rt_tb/unknown")
+  _rt_u=$(sed -n '1,3p' "$_rt_tb/unknown" | sed "s/.*/'&'/" | tr '\n' ' ')
   rm -rf "$_rt_tb"
   echo "tests: $T_OK passed, $T_BAD failed [$((T_OK + T_BAD))] -- $_rt_n test(s) in $_rt_b block(s)"
+  [ "$_rt_un" = "0" ] || { echo " >>> --titles: $_rt_un title(s) name no test of the run list -- ${_rt_u% }"; return 1; }
   [ "$T_BAD" = "0" ]
 }
 
@@ -3926,27 +3977,31 @@ while [ "$_n" -gt 0 ]; do
     --stamp-version)  stamp_version; exit $? ;;
     -V|--verbose)     VRB=1 ;;
     -Q|--quiet)       QUIET=1 ;;
-    --config)         [ "$_n" -ge 1 ] || err 00120 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --config)         [ "$_n" -ge 1 ] || err 00121 "--config needs a file"; CONFIG_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --config=*)       CONFIG_ARG="${_a#--config=}" ;;
-    --user)           [ "$_n" -ge 1 ] || err 00121 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --user)           [ "$_n" -ge 1 ] || err 00122 "--user needs a user name"; USER_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --user=*)         USER_ARG="${_a#--user=}" ;;
-    --group)          [ "$_n" -ge 1 ] || err 00122 "--group needs a group name"; GROUP_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --group)          [ "$_n" -ge 1 ] || err 00123 "--group needs a group name"; GROUP_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --group=*)        GROUP_ARG="${_a#--group=}" ;;
     --recommended)    RECOMMENDED=1 ;;
     --catch)          CATCH=1 ;;
-    --service)        [ "$_n" -ge 1 ] || err 00123 "--service needs a service: a part of its name (RemovableVolumes), or all"; SERVICE_SEL="$1"; shift; _n=$((_n - 1)) ;;
+    --service)        [ "$_n" -ge 1 ] || err 00124 "--service needs a service: a part of its name (RemovableVolumes), or all"; SERVICE_SEL="$1"; shift; _n=$((_n - 1)) ;;
     --service=*)      SERVICE_SEL="${_a#--service=}" ;;
-    --since)          [ "$_n" -ge 1 ] || err 00124 "--since needs a local time, YYYY-MM-DD HH:MM:SS"; SINCE_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --since)          [ "$_n" -ge 1 ] || err 00125 "--since needs a local time, YYYY-MM-DD HH:MM:SS"; SINCE_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --since=*)        SINCE_ARG="${_a#--since=}" ;;
-    --until)          [ "$_n" -ge 1 ] || err 00125 "--until needs a local time, YYYY-MM-DD HH:MM:SS"; UNTIL_ARG="$1"; shift; _n=$((_n - 1)) ;;
+    --until)          [ "$_n" -ge 1 ] || err 00126 "--until needs a local time, YYYY-MM-DD HH:MM:SS"; UNTIL_ARG="$1"; shift; _n=$((_n - 1)) ;;
     --until=*)        UNTIL_ARG="${_a#--until=}" ;;
     --create-config)  if [ "$_n" -ge 1 ] && [ "${1#-}" = "$1" ]; then create_config "$1"; else create_config; fi; exit 0 ;;
     --create-config=*) create_config "${_a#--create-config=}"; exit 0 ;;
-    --run-tests)      run_tests "${1:-}"; exit $? ;;
+    --run-tests)      case "${1:-}" in
+                        --list)   run_list; exit 0 ;;
+                        --titles) run_tests --titles "${2:-}"; exit $? ;;
+                        *)        run_tests "${1:-}"; exit $? ;;
+                      esac ;;
     --install)        INSTALL=1 ;;
     --list|--denied|--add|--remove|--cleanup|--reset|--create|--destroy|--status|--test)
-                      err 00126 "no such option; you mean \`$US ${_a#--}\`" ;;
-    -*)               err 00127 "unknown option '$_a' (--help)" ;;
+                      err 00127 "no such option; you mean \`$US ${_a#--}\`" ;;
+    -*)               err 00128 "unknown option '$_a' (--help)" ;;
     *)                set -- "$@" "$_a" ;;
   esac
 done
@@ -3955,24 +4010,24 @@ done
 CMD="${1:-}"; [ $# -gt 0 ] && shift
 case "$CMD" in
   list|denied|add|remove|cleanup|reset|create|destroy|status|test) ;;
-  rm)  err 00128 "no such command; you mean \`$US remove\`" ;;
-  install) err 00129 "no such command; you mean \`$US --install\`" ;;
+  rm)  err 00129 "no such command; you mean \`$US remove\`" ;;
+  install) err 00130 "no such command; you mean \`$US --install\`" ;;
   "")  [ "$INSTALL" = "1" ] || { usage 1>&2; exit 1; } ;;
-  *)   err 00130 "unknown command '$CMD' (--help)" ;;
+  *)   err 00131 "unknown command '$CMD' (--help)" ;;
 esac
-[ "$INSTALL" = "0" ] || [ -z "$CMD" ] || err 00131 "--install goes alone -- it records what this machine lets my-fda do"
-[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00132 "--user goes with create -- the user a new launcher runs its target as"
-[ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00133 "--group goes with create -- with --user, the primary group a new launcher takes"
-[ "$CATCH" = "0" ] || [ "$CMD" = denied ] || err 00134 "--catch goes with denied -- it waits for the next refused check"
-[ -z "$SERVICE_SEL" ] || [ "$CMD" = denied ] || [ "$CMD" = list ] || err 00135 "--service goes with denied or list -- the TCC services whose refusals it reports, or whose grants it lists"
-[ -z "$SINCE_ARG" ] || [ "$CMD" = denied ] || err 00136 "--since goes with denied -- the local time its window starts at"
-[ -z "$UNTIL_ARG" ] || [ "$CMD" = denied ] || err 00137 "--until goes with denied -- with --since, the local time its window ends at"
-[ "$RECOMMENDED" = "0" ] || [ "$CMD" = remove ] || err 00138 "--recommended goes with remove -- the grants '$US list' marks '$TO_REMOVE'"
+[ "$INSTALL" = "0" ] || [ -z "$CMD" ] || err 00132 "--install goes alone -- it records what this machine lets my-fda do"
+[ -z "$USER_ARG" ] || [ "$CMD" = create ] || err 00133 "--user goes with create -- the user a new launcher runs its target as"
+[ -z "$GROUP_ARG" ] || [ "$CMD" = create ] || err 00134 "--group goes with create -- with --user, the primary group a new launcher takes"
+[ "$CATCH" = "0" ] || [ "$CMD" = denied ] || err 00135 "--catch goes with denied -- it waits for the next refused check"
+[ -z "$SERVICE_SEL" ] || [ "$CMD" = denied ] || [ "$CMD" = list ] || err 00136 "--service goes with denied or list -- the TCC services whose refusals it reports, or whose grants it lists"
+[ -z "$SINCE_ARG" ] || [ "$CMD" = denied ] || err 00137 "--since goes with denied -- the local time its window starts at"
+[ -z "$UNTIL_ARG" ] || [ "$CMD" = denied ] || err 00138 "--until goes with denied -- with --since, the local time its window ends at"
+[ "$RECOMMENDED" = "0" ] || [ "$CMD" = remove ] || err 00139 "--recommended goes with remove -- the grants '$US list' marks '$TO_REMOVE'"
 
 need_root
 load_config
 install_zsh_completion
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00139 "mktemp failed"
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00140 "mktemp failed"
 interrupt_traps
 
 case "$CMD" in
