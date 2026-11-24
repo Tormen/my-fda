@@ -183,6 +183,10 @@ selection goes through the pipe `list` is made for:
 - **Without Full Disk Access** -- a LaunchDaemon's run -- `denied` still
   reads the log; the grants it cannot read are named in one line, and what
   to do is then from the log alone. `-Q` prints the lines alone.
+- **No raw log spooled to disk:** `denied` streams `log show` directly
+  into the parser instead of writing the raw log into `/tmp`, and startup
+  removes stale `my-fda.*` temp directories or files left by a killed run
+  (preserving live runs).
 - **IDs** are 6 hex characters of the client, the same on every run, followed
   by a TAB -- `cut -f 1` returns them.
 - **A path is granted as its real path:** macOS records the file with its

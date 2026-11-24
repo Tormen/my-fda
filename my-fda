@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="321cf09"
-SCRIPT_RELEASE="v0.2-33-g321cf09"
+SCRIPT_COMMIT="c6db2e3"
+SCRIPT_RELEASE="v0.2-35-gc6db2e3"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -401,6 +401,7 @@ c_lsof="/usr/sbin/lsof"
 c_id="/usr/bin/id"
 c_date="/bin/date"
 c_git="/usr/bin/git"
+c_find="/usr/bin/find"
 
 # How far back denied reads the system log when given no window.
 DENIED_LAST_DEFAULT="1d"
@@ -428,7 +429,7 @@ _EOF
 }
 
 CONFIG_KEYS="TCC_DB USERS_DIR BACKUP_DIR HELPER_DIR LAUNCHD_DIR FDA_PANE_URL BREW_CELLARS SHELLS BREW_TREES GENERAL_TOOLS
-  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log c_ps c_lsof DENIED_LAST_DEFAULT c_pbcopy c_dscl c_id DENIED_SERVICES c_date c_git"
+  c_sqlite3 c_md5 c_mdfind c_open c_killall c_launchctl c_plutil c_cc c_xcode_select c_tccutil c_osascript c_codesign c_csreq MDM_OVERRIDES c_log c_ps c_lsof DENIED_LAST_DEFAULT c_pbcopy c_dscl c_id DENIED_SERVICES c_date c_git c_find"
 
 # sh: 0 not there, 1 there ([ -r ] it: unreadable is the error), 2 cannot tell
 # Judged by the system's own answer, never by mode bits: macOS can refuse a
@@ -1337,10 +1338,10 @@ refusal_scope() { # [PROGRAM]
 # it may still run, since tccd's line names no parent -- then the files it
 # has open, as near as anything comes to the file it was refused (tccd's
 # line names none either); it stops after the first one it could still see.
-refusals() { # [catch] [PROGRAM]
+refusals() { # [catch] [PROGRAM] [counts FILE]
   _sm="set"; _sp=$DENIED_SERVICES
   case "$SERVICE_SEL" in "") ;; all) _sm="all" ;; *) _sm="part"; _sp=$SERVICE_SEL ;; esac
-  awk -v svc="$SERVICE" -v catch="${1:-}" -v prog="${2:-}" -v selmode="$_sm" -v selpat="$_sp" \
+  awk -v svc="$SERVICE" -v catch="${1:-}" -v prog="${2:-}" -v counts="${3:-}" -v selmode="$_sm" -v selpat="$_sp" \
       -v ps="$c_ps" -v lsof="$c_lsof" -v idc="$c_id" -v ign="$DENIED_IGNORE" -v vrb="$VRB" '
     BEGIN {
       if (ign != "") {            # DENIED_IGNORE as one regex, lower case
@@ -1470,12 +1471,14 @@ refusals() { # [catch] [PROGRAM]
       fd = $1; ft = t; fsv = sv; fwhy = why; ftg = tg; ftu = tu
     }
     $4 ~ /^tccd\[/ && index($0, "forwardMessage error: ") {
+      rf++
       w = $0; sub(/.*forwardMessage error: /, "", w); sub(/\. \(service=.*/, "", w)
       p = $4; sub(/^tccd\[/, "", p); sub(/:.*/, "", p)
       failed(field("service", $0), w, field("target_id", $0) "[" field("target_pid", $0) "]", (p in tpu ? tname(tpu[p]) : "?"))
       next
     }
     $4 ~ /^sandboxd\[/ && index($0, "tcc_server_message_request_authorization(") {
+      rf++
       sv = $0; sub(/.*request_authorization\(/, "", sv); sub(/\).*/, "", sv)
       if (fd == $1 && secs($2) - ft <= 1 && fsv == sv) next   # the failure tccd named already, with its reason and target
       w = $0; sub(/.*Code=[0-9]+ "/, "", w); sub(/".*/, "", w)
@@ -1489,6 +1492,7 @@ refusals() { # [catch] [PROGRAM]
     $4 ~ /^kernel\[/ && index($0, "System Policy: ") {
       x = $0; sub(/.*System Policy: /, "", x)
       if (x !~ /^[^(]+\([0-9]+\) deny\(/) next
+      if (index($0, " System Policy: ") > 0) rk++
       pr = x; sub(/\(.*/, "", pr); kp = x; sub(/^[^(]*\(/, "", kp); sub(/\).*/, "", kp)
       x = substr(x, index(x, ") deny(") + 2); sub(/^deny\([0-9]+\) /, "", x)
       op = x; sub(/ .*/, "", op); pa = x; sub(/^[^ ]+ ?/, "", pa)
@@ -1521,6 +1525,7 @@ refusals() { # [catch] [PROGRAM]
       b = block("responsible"); rp[k] = field("responsible_path", b); idn[k] = field("identifier", b)
     }
     $6 == "AUTHREQ_RESULT:"      {
+      rn++
       k = key(); n++
       m = $0; sub(/.*msgID=/, "", m); sub(/[, ].*/, "", m)
       SN[n] = m; sub(/\..*/, "", SN[n]); SQ[n] = m; sub(/^[^.]*\./, "", SQ[n])
@@ -1550,6 +1555,13 @@ refusals() { # [catch] [PROGRAM]
       forget(n)
     }
     END {                              # what was still held: no next answer came
+      if (counts != "") {
+        co = ""
+        if (rn) co = co (co == "" ? "" : "; ") "tccd answers read: " rn
+        if (rf) co = co (co == "" ? "" : "; ") "tccd failures read: " rf
+        if (rk) co = co (co == "" ? "" : "; ") "kernel refusals read: " rk
+        if (co != "") { printf " [%s]", co > counts; close(counts) }
+      }
       if (done) exit
       for (S in pend) inv[pend[S]] = 1
       for (i = 1; i <= n; i++) if (i in inv) emit(i, "refused", 0)
@@ -1721,17 +1733,17 @@ cmd_denied() { # [PROGRAM] [LAST]
   refusal_scope "$_prog"
   PHASE="reading the system log -- nothing was changed"
   msg " >>> tccd's checks in the system log $_of ($_scope) -- a long window takes a while"
-  run_echoed "$c_log" show --style compact "$@" --predicate "$REFUSAL_PREDICATE" > "$WORK/log" 2> "$WORK/log.err" \
-    || err 00081 "log show failed: $(cat "$WORK/log.err")"
-  # what was read, raw -- tccd's answers, the checks it could not answer
-  # (its own forwarding error, or sandboxd's), the kernel's refusals --
-  # each part only when not 0; with all 0 the bracket is left out
-  _r=$(awk '$6 == "AUTHREQ_RESULT:" { n++ }
-    ($4 ~ /^tccd\[/ && index($0, "forwardMessage error: ")) || ($4 ~ /^sandboxd\[/ && index($0, "tcc_server_message_request_authorization(")) { f++ }
-    $4 ~ /^kernel\[/ && / System Policy: [^(]+\([0-9]+\) deny\(/ { k++ }
-    function part(s, v) { if (v) o = o (o == "" ? "" : "; ") s v }
-    END { part("tccd answers read: ", n); part("tccd failures read: ", f); part("kernel refusals read: ", k); if (o != "") printf " [%s]", o }' "$WORK/log")
-  refusals "" "$_progarg" < "$WORK/log" > "$WORK/checks"
+  # Stream log show straight into refusals without spooling raw compact logs
+  # to disk (a busy 24h window can exceed 600 MB), while keeping log show's
+  # exit code and raw line counts.
+  [ "$VRB" = "1" ] && printf ' >>> %s show --style compact %s --predicate %s\n' "$c_log" "$*" "$REFUSAL_PREDICATE"
+  : > "$WORK/log.rc"; : > "$WORK/counts"
+  { "$c_log" show --style compact "$@" --predicate "$REFUSAL_PREDICATE" 2> "$WORK/log.err"
+    printf '%s\n' "$?" > "$WORK/log.rc"
+  } | refusals "" "$_progarg" "$WORK/counts" > "$WORK/checks"
+  _rc=$(cat "$WORK/log.rc")
+  [ "${_rc:-1}" = "0" ] || err 00081 "log show failed: $(cat "$WORK/log.err")"
+  _r=$(cat "$WORK/counts" 2>/dev/null)
   # listed: refused, and refused with no answer, unless DENIED_IGNORE names
   # the program; counted, and shown only with -V: probes, kernel refusals
   # with no privacy check, ignored programs, answers whose request (the
@@ -2143,6 +2155,48 @@ interrupt_traps() {
   trap 'rm -rf "$WORK"; printf "%s: interrupted (Ctrl-C) while %s\n" "$US" "$PHASE" 1>&2; exit 130' INT TERM HUP
 }
 
+# Remove stale my-fda.* temp dirs/files in TMPDIR left behind by killed runs
+# (SIGKILL skips interrupt_traps): anything owned by this uid whose owner pid
+# is gone (or, without a pid file, untouched for >= 5 minutes). Any live run's
+# directory stays untouched.
+cleanup_stale_work() {
+  _cw_tmp=${TMPDIR:-/tmp}; _cw_tmp=${_cw_tmp%/}; : "${_cw_tmp:=/}"
+  _cw_uid=$(id -u)
+  _cw_rm=0
+  for _cw_d in "$_cw_tmp"/my-fda.*; do
+    [ "$_cw_d" = "$WORK" ] && continue
+    [ -L "$_cw_d" ] && continue
+    if [ -d "$_cw_d" ]; then
+      case "${_cw_d##*/}" in my-fda.*.*) continue ;; esac
+      [ -n "$("$c_find" "$_cw_d" -maxdepth 0 -user "$_cw_uid" 2>/dev/null)" ] || continue
+      if [ -f "$_cw_d/pid" ]; then
+        _cw_pid=""
+        read -r _cw_pid < "$_cw_d/pid" 2>/dev/null
+        case "$_cw_pid" in ""|*[!0-9]*) _cw_pid="" ;; esac
+        if [ -n "$_cw_pid" ] && kill -0 "$_cw_pid" 2>/dev/null; then
+          _cw_cmd=$("$c_ps" -p "$_cw_pid" -o args= 2>/dev/null)
+          # Empty output (e.g. ps blocked cleanly) keeps the live-pid directory safe.
+          [ -n "$_cw_cmd" ] || continue
+          case "$_cw_cmd" in *"$US"*|*my-fda*) continue ;; esac
+        fi
+      else
+        # No pid file (older binary or mid-startup): remove only once quiet for >= 5m.
+        _cw_rec=$("$c_find" "$_cw_d" -mmin -5 2>/dev/null) || continue
+        [ -z "$_cw_rec" ] || continue
+      fi
+      rm -rf "$_cw_d" && _cw_rm=$((_cw_rm + 1))
+    elif [ -f "$_cw_d" ]; then
+      case "${_cw_d##*/}" in my-fda.comp.*|my-fda.zshrc.*|my-fda.stamp.*) ;; *) continue ;; esac
+      [ -n "$("$c_find" "$_cw_d" -maxdepth 0 -user "$_cw_uid" 2>/dev/null)" ] || continue
+      _cw_rec=$("$c_find" "$_cw_d" -mmin -5 2>/dev/null) || continue
+      [ -z "$_cw_rec" ] || continue
+      rm -f "$_cw_d" && _cw_rm=$((_cw_rm + 1))
+    fi
+  done
+  [ "$_cw_rm" -gt 0 ] && warn "    > removed $_cw_rm stale temp item(s) under $_cw_tmp (left by an earlier killed run)"
+  return 0
+}
+
 ############################################################## zsh completion
 
 # The zsh completion, rendered for this config: the launcher names come
@@ -2272,7 +2326,7 @@ t_world() {
   export T_DIR
   c_mdfind="$T_STUBS/mdfind"; c_open="$T_STUBS/open"; c_launchctl="$T_STUBS/launchctl"
   c_tccutil="$T_STUBS/tccutil"; c_pbcopy="$T_STUBS/pbcopy"; c_osascript="$T_STUBS/osascript"
-  c_log="$T_STUBS/log"; c_ps=/bin/ps; c_lsof=/usr/sbin/lsof; c_id="$T_STUBS/id"; c_date=/bin/date; SITE_CONF="$T_DIR/site.conf"; DENIED_IGNORE=""; DENIED_LAST_DEFAULT="1d"; CATCH=0; SERVICE_SEL=""; SINCE_ARG=""; UNTIL_ARG=""
+  c_log="$T_STUBS/log"; c_ps=/bin/ps; c_lsof=/usr/sbin/lsof; c_id="$T_STUBS/id"; c_date=/bin/date; c_find=/usr/bin/find; SITE_CONF="$T_DIR/site.conf"; DENIED_IGNORE=""; DENIED_LAST_DEFAULT="1d"; CATCH=0; SERVICE_SEL=""; SINCE_ARG=""; UNTIL_ARG=""
   eval "$(default_config | grep '^DENIED_SERVICES=')"   # the shipped services, from their one owner
   MDM_OVERRIDES="$T_DIR/MDMOverrides.plist"
   "$c_sqlite3" "$TCC_DB" "create table access (service text, client text, client_type integer, auth_value integer, last_modified integer, indirect_object_identifier text default 'UNUSED', primary key (service, client, client_type, indirect_object_identifier));"
@@ -3238,6 +3292,57 @@ t_denied_ignore_leaves_out_the_programs_named() {
   _o=$( (DENIED_IGNORE="epson"; cmd_denied) 2>&1)
   case "$_o" in *"com.epson.edca "*) t_pass ;; *) t_fail "a name that is no whole name ignored it: '$_o'" ;; esac
 }
+# denied streams log show straight into refusals: no raw $WORK/log spooled to
+# disk, counts stay exact, and a failing log show still fails loudly.
+t_denied_streams_without_spooling_log() {
+  { t_check 191 1.1 "$SERVICE" "$T_DIR/bin/tool" "$T_DIR/bin/tool" 0
+    t_check 191 1.2 "$SERVICE" /usr/sbin/sshd /usr/libexec/sshd-session 2; } > "$T_DIR/tccd.log"
+  _o=$(cmd_denied 2>&1); _rc=$?
+  [ "$_rc" = "0" ] || { t_fail "rc $_rc: '$_o'"; return; }
+  [ ! -e "$WORK/log" ] || { t_fail "spooled raw log to $WORK/log"; return; }
+  case "$_o" in *"1 refused check(s) from 1 program(s)"*"[tccd answers read: 2]"*) ;; *) t_fail "output: '$_o'"; return ;; esac
+  printf '%s\n' '#!/bin/sh' 'echo "log failed deliberately" >&2' 'exit 64' > "$T_DIR/bad-log"
+  chmod 755 "$T_DIR/bad-log"
+  _o=$( (c_log="$T_DIR/bad-log"; cmd_denied) 2>&1); _rc=$?
+  case "$_rc|$_o" in 1"|"*ERROR*"log show failed: log failed deliberately"*) t_pass ;; *) t_fail "failed log: rc $_rc '$_o'" ;; esac
+}
+# Startup temp cleanup removes stale my-fda.* entries owned by this uid (dead
+# pid, pid reused by another program, or pid-less older than 5m) and leaves
+# live runs, recent pid-less dirs, and current $WORK alone.
+t_startup_cleans_stale_work_and_keeps_live() {
+  _td="$T_DIR/tmp"; mkdir -p "$_td"
+  _own="$_td/my-fda.cur000"; mkdir -p "$_own"; printf '%s\n' "$$" > "$_own/pid"
+  _dead_d="$_td/my-fda.dead00"; mkdir -p "$_dead_d"
+  true & _dp=$!; wait "$_dp"
+  printf '%s\n' "$_dp" > "$_dead_d/pid"; : > "$_dead_d/big"
+  # A live dash subshell stays running with my-fda in its argv (trailing ':' avoids exec).
+  ( sleep 30; : ) & _lp=$!
+  _live_d="$_td/my-fda.live00"; mkdir -p "$_live_d"
+  printf '%s\n' "$_lp" > "$_live_d/pid"
+  _reuse_d="$_td/my-fda.reuse0"; mkdir -p "$_reuse_d"
+  printf '%s\n' "$_lp" > "$_reuse_d/pid"
+  printf '%s\n' '#!/bin/sh' "if [ \"\$2\" = \"$_lp\" ]; then echo '/bin/dash /path/to/my-fda'; fi" > "$T_DIR/ps-live"
+  chmod 755 "$T_DIR/ps-live"
+  _old_d="$_td/my-fda.old000"; mkdir -p "$_old_d"; touch -t 202001010000 "$_old_d"
+  _new_d="$_td/my-fda.new000"; mkdir -p "$_new_d"
+  _old_f="$_td/my-fda.comp.old0"; : > "$_old_f"; touch -t 202001010000 "$_old_f"
+  _new_f="$_td/my-fda.comp.new0"; : > "$_new_f"
+  _o=$( (TMPDIR="$_td/"; WORK="$_own"; c_ps="$T_DIR/ps-live"; cleanup_stale_work) 2>&1)
+  [ -d "$_own" ] && [ -d "$_live_d" ] && [ -d "$_reuse_d" ] && [ -d "$_new_d" ] && [ -f "$_new_f" ] \
+    || { kill "$_lp" 2>/dev/null; wait "$_lp" 2>/dev/null; t_fail "removed live/recent item: '$_o'"; return; }
+  [ ! -e "$_dead_d" ] && [ ! -e "$_old_d" ] && [ ! -e "$_old_f" ] \
+    || { kill "$_lp" 2>/dev/null; wait "$_lp" 2>/dev/null; t_fail "left stale item: '$_o'"; return; }
+  case "$_o" in *"removed 3 stale temp item(s) under $_td"*) ;; *) kill "$_lp" 2>/dev/null; wait "$_lp" 2>/dev/null; t_fail "msg: '$_o'"; return ;; esac
+  # When ps reports an unrelated process reusing that pid, remove the stale dir.
+  printf '%s\n' '#!/bin/sh' 'echo "/bin/sleep 30"' > "$T_DIR/ps-other"
+  chmod 755 "$T_DIR/ps-other"
+  _o=$( (TMPDIR="$_td"; WORK="$_own"; c_ps="$T_DIR/ps-other"; cleanup_stale_work) 2>&1)
+  kill "$_lp" 2>/dev/null; wait "$_lp" 2>/dev/null
+  [ ! -e "$_reuse_d" ] && [ ! -e "$_live_d" ] || { t_fail "kept pid-reused dir: '$_o'"; return; }
+  _o=$( (TMPDIR="$_td"; WORK="$_own"; c_ps="$T_DIR/ps-other"; cleanup_stale_work) 2>&1)
+  [ -z "$_o" ] || { t_fail "second clean run said: '$_o'"; return; }
+  t_pass
+}
 t_add_finds_a_grant_under_its_real_path() {
   ln -s "$T_DIR/bin" "$T_DIR/linked"
   t_grant 1 "$T_DIR/bin/tool"                       # macOS records the REAL path
@@ -3873,6 +3978,7 @@ run_list() {
     t_denied_reports_a_refusal_tccd_never_answered t_denied_a_no_answer_from_a_launcher_asks_for_no_launcher t_denied_a_no_answer_with_no_job_named_asks_for_no_launcher t_denied_pairs_a_kernel_refusal_only_with_the_failure_of_its_second \
     t_denied_service_part_leaves_out_an_unknown_service t_denied_since_reads_from_a_local_time t_denied_until_ends_a_since_window \
     t_denied_counts_kernel_refusals_with_no_privacy_check t_denied_tells_an_app_from_a_job t_denied_ignore_leaves_out_the_programs_named \
+    t_denied_streams_without_spooling_log t_startup_cleans_stale_work_and_keeps_live \
                 t_add_takes_a_file_the_screen_user_reads_through_a_group \
                 t_launcher_is_readable_and_run_by_root_only \
                 t_as_root_open_runs_in_the_screen_users_session \
@@ -4027,8 +4133,11 @@ esac
 need_root
 load_config
 install_zsh_completion
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/my-fda.XXXXXX") || err 00140 "mktemp failed"
+_tmp_dir=${TMPDIR:-/tmp}; _tmp_dir=${_tmp_dir%/}; : "${_tmp_dir:=/}"
+WORK=$(mktemp -d "$_tmp_dir/my-fda.XXXXXX") || err 00140 "mktemp failed"
 interrupt_traps
+printf '%s\n' "$$" > "$WORK/pid"
+cleanup_stale_work
 
 case "$CMD" in
   "")      cmd_install ;;
