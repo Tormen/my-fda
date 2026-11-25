@@ -145,6 +145,8 @@ selection goes through the pipe `list` is made for:
   `?` -- never a guess. When `from` is `-` or only a shell (`com.apple.sh`: every
   script runs in one), nothing names the job, and the hint is `denied --catch`,
   never a launcher -- a launcher for the shell would be a grant to every script.
+  When `from` is Apple's own (`com.apple.*` other than a shell) or the program is
+  `XProtectRemediator*`, it is marked Apple's own as for an answered refusal.
   The kernel's side of a refusal tccd answered is not
   listed twice. Its `Sandbox: ...` lines are other sandboxes' and are left
   out.
