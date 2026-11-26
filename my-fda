@@ -8,8 +8,8 @@
 # job and never change, so the grant lasts.
 
 SCRIPT_VERSION="0.2"
-SCRIPT_COMMIT="6352e0f"
-SCRIPT_RELEASE="v0.2-36-g6352e0f"
+SCRIPT_COMMIT="8ad748b"
+SCRIPT_RELEASE="v0.2-37-g8ad748b"
 
 US="${0##*/}"
 QUIET=0; VRB=0
@@ -1646,7 +1646,7 @@ render_refusals() { # <grants FILE>
           note = apple_note
         # an app the user runs (a bundle id, not the program path of a job): the pane grants it
         else if (sv[k] != svc && c !~ /^\//)
-          note = "an app: System Settings > Privacy & Security > Files and Folders, " c " -- allow it there, or leave it refused"
+          note = "an app: allow it there (System Settings > Privacy & Security > Files and Folders, " c "), or leave it refused for good: add " c " to DENIED_IGNORE in my-fda.conf (a rollout step)"
         else if (sv[k] != svc) note = "no grant here -> give its job a launcher with Full Disk Access (" us " create)"
         # both dates are local "YYYY-MM-DD HH:MM:SS": they compare as strings
         else if (g[c] == "allowed[2]" && gd[c] > last[k]) note = "granted " gd[c] ", after the last refusal -- nothing to do"
@@ -3299,7 +3299,7 @@ t_denied_tells_an_app_from_a_job() {
   { t_check 1919 2.1 kTCCServiceSystemPolicyRemovableVolumes com.epson.edca /Applications/Edca.app/Contents/MacOS/Edca 0 12:04:32 777 - 1001
     t_check 1919 3.1 kTCCServiceSystemPolicyRemovableVolumes "$T_DIR/bin/vol" "$T_DIR/bin/vol" 0 12:04:33 778 "" 1001; } > "$T_DIR/tccd.log"
   _o=$(cmd_denied 2>&1)
-  case "$_o" in *"com.epson.edca "*"an app: System Settings > Privacy & Security > Files and Folders, com.epson.edca -- allow it there, or leave it refused"*) ;; *) t_fail "app: '$_o'"; return ;; esac
+  case "$_o" in *"com.epson.edca "*"an app: allow it there (System Settings > Privacy & Security > Files and Folders, com.epson.edca), or leave it refused for good: add com.epson.edca to DENIED_IGNORE in my-fda.conf (a rollout step)"*) ;; *) t_fail "app: '$_o'"; return ;; esac
   case "$(printf '%s\n' "$_o" | grep '^com.epson.edca ')" in *launcher*) t_fail "app told to get a launcher: '$_o'"; return ;; esac
   case "$_o" in *"/bin/vol "*"no grant here -> give its job a launcher with Full Disk Access"*) t_pass ;; *) t_fail "job: '$_o'" ;; esac
 }

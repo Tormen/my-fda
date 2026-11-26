@@ -165,7 +165,7 @@ selection goes through the pipe `list` is made for:
 - **An app or a job.** A program refused a narrower protection is pointed at
   a launcher (`my-fda create`) when it is a path -- a job of yours; an app,
   named by its bundle id, at System Settings > Privacy & Security > Files and
-  Folders, where its grant is given -- or left refused.
+  Folders, where its grant is given -- or left refused for good in `DENIED_IGNORE`.
 - **`DENIED_IGNORE`** (config): programs whose refusals are left out, by
   file name or glob, `|` between them, ignoring case, matched against the
   program, `via` and `from` -- counted, shown with `-V`, left out with `-Q`
